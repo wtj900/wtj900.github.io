@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      AFNetworking与ASIHTTPRequest的区别
+title:      AFNetworking学习之路(一)
 subtitle:   AFNetworking与ASIHTTPRequest的区别
 date:       2017-10-18
 author:     JT
@@ -76,4 +76,5 @@ tags:
 > 
 > 3、可以统一管理所有请求（还专门提供了一个叫做ASINetworkQueue来管理所有的请求对象）
 >> 暂停\恢复\取消所有的请求
+>> 
 >> 监听整个队列中所有请求的下载进度和上传进度
