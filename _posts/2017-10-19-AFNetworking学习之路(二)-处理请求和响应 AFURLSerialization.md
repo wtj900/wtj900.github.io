@@ -27,7 +27,6 @@ tags:
 ~~~
 @protocol AFURLResponseSerialization <NSObject, NSSecureCoding, NSCopying>
 
- */
 - (nullable id)responseObjectForResponse:(nullable NSURLResponse *)response
                            data:(nullable NSData *)data
                           error:(NSError * _Nullable __autoreleasing *)error NS_SWIFT_NOTHROW;
@@ -107,19 +106,19 @@ tags:
 
 ```
 if ([data length] > 0 && [response URL]) {
-                NSMutableDictionary *mutableUserInfo = [@{
+    NSMutableDictionary *mutableUserInfo = [@{
                                                           NSLocalizedDescriptionKey: [NSString stringWithFormat:NSLocalizedStringFromTable(@"Request failed: unacceptable content-type: %@", @"AFNetworking", nil), [response MIMEType]],
                                                           NSURLErrorFailingURLErrorKey:[response URL],
                                                           AFNetworkingOperationFailingURLResponseErrorKey: response,
                                                         } mutableCopy];
-                if (data) {
-                    mutableUserInfo[AFNetworkingOperationFailingURLResponseDataErrorKey] = data;
-                }
+     if (data) {
+         mutableUserInfo[AFNetworkingOperationFailingURLResponseDataErrorKey] = data;
+     }
 
-                validationError = AFErrorWithUnderlyingError([NSError errorWithDomain:AFURLResponseSerializationErrorDomain code:NSURLErrorCannotDecodeContentData userInfo:mutableUserInfo], validationError);
-            }
+     validationError = AFErrorWithUnderlyingError([NSError errorWithDomain:AFURLResponseSerializationErrorDomain code:NSURLErrorCannotDecodeContentData userInfo:mutableUserInfo], validationError);
+}
 
-            responseIsValid = NO;
+responseIsValid = NO;
 ```
 
 其中第一、二部分的代码非常相似，出现错误时通过`AFErrorWithUnderlyingError`生成格式化之后的错误，最后设置`responseIsValid`。
@@ -131,13 +130,13 @@ NSMutableDictionary *mutableUserInfo = [@{
                                                AFNetworkingOperationFailingURLResponseErrorKey: response,
                                        } mutableCopy];
 
-            if (data) {
-                mutableUserInfo[AFNetworkingOperationFailingURLResponseDataErrorKey] = data;
-            }
+if (data) {
+     mutableUserInfo[AFNetworkingOperationFailingURLResponseDataErrorKey] = data;
+}
 
-            validationError = AFErrorWithUnderlyingError([NSError errorWithDomain:AFURLResponseSerializationErrorDomain code:NSURLErrorBadServerResponse userInfo:mutableUserInfo], validationError);
+validationError = AFErrorWithUnderlyingError([NSError errorWithDomain:AFURLResponseSerializationErrorDomain code:NSURLErrorBadServerResponse userInfo:mutableUserInfo], validationError);
 
-            responseIsValid = NO;
+responseIsValid = NO;
 
 ```
 第二部分的代码就不说了，实现上都是差不多的。
