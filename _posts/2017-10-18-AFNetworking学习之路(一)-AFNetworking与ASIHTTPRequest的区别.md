@@ -1,6 +1,6 @@
 ---
-layout:     keynote
-title:      AFNetworking学习之路(一)
+layout:     default
+title:      AFNetworking学习之路(一d)
 subtitle:   AFNetworking与ASIHTTPRequest的区别
 date:       2017-10-18
 author:     JT
