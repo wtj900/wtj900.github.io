@@ -1,11 +1,11 @@
 ---
-layout:     post
+layout:     page
 title:      AFNetworking学习之路(一)
 subtitle:   AFNetworking与ASIHTTPRequest的区别
 date:       2017-10-18
 author:     JT
 header-img: img/post-bg-ios9-web.jpg
-catalog: true
+catalog:    true
 tags:
     - iOS
     - AFNetworking
