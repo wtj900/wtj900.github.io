@@ -1,11 +1,11 @@
 ---
 layout:     post
 title:      AFNetworking学习之路(二)
-subtitle:   处理请求和响应 AFURLSerialization
+subtitle:   序列化请求和响应
 date:       2017-10-19
 author:     JT
 header-img: img/post-bg-ios9-web.jpg
-catalog: true
+catalog:    true
 tags:
     - iOS
     - AFNetworking

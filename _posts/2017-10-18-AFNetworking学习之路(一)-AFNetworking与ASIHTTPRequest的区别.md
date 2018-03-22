@@ -12,11 +12,11 @@ tags:
 ---
 # 底层实现
 
-> 1、AFN的底层实现基于OC的NSURLConnection和NSURLSession
+> 1、AFN的底层实现基于OC的NSURLSession
 > 
 > 2、ASI的底层实现基于纯C语言的CFNetwork框架
 > 
-> 3、因为NSURLConnection和NSURLSession是在CFNetwork之上的一层封装，因此ASI的运行性能高于AFN
+> 3、因为NSURLSession是在CFNetwork之上的一层封装，因此ASI的运行性能高于AFN
 
 # 对服务器返回的数据处理
 
