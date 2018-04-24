@@ -1,19 +1,14 @@
 ---
 layout:     post
-title:      在 Swift 中使用 IBInspectable
+title:      Swift 使用 IBInspectable
 subtitle:   IBInspectable 在 Swift 中的实际应用
 date:       2017-05-05
-author:     BY
+author:     JT
 header-img: img/post-bg-swift.jpg
-catalog: true
+catalog:    true
 tags:
-    - iOS
     - Swift
-    - IBInspectable
 ---
-
-
-> 本文首次发布于 [BY Blog](http://qiubaiying.github.io), 作者 [@柏荧(BY)](http://github.com/qiubaiying) ,转载请保留原文链接.
 
 # 前言
 

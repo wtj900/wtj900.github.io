@@ -1,16 +1,13 @@
 ---
 layout:     post
-title:      强化 swift 中的 print
-subtitle:   强化 swift 中的 print 输出函数
+title:      Swift 知识点
+subtitle:   强化 print 输出函数
 date:       2017-04-07
-author:     BY
+author:     JT
 header-img: img/post-bg-universe.jpg
-catalog: true
+catalog:    true
 tags:
-    - iOS
     - Swift
-    - Xcode
-    - Debug
 ---
 
 在 Swift 中，最简单的输出方法就是使用 `print()`，在我们关心的地方输出字符串和值。
@@ -76,6 +73,3 @@ public func printm(items: Any..., filename: String = #file, function: String = #
 #### 参考:
 
 - [《LOG 输出》](http://swifter.tips/log/) - 王巍 (@ONEVCAT)
-
-
-> 本文首次发布于 [BY Blog](http://qiubaiying.github.io), 作者 [@柏荧(BY)](http://github.com/qiubaiying) ,转载请保留原文链接.
