@@ -4,7 +4,7 @@ title:      ReactiveCocoa
 subtitle:   RAC从入门到精通
 date:       2018-07-25
 author:     JT
-header-img: img/post-bg-rac.png
+header-img: img/post-bg-github-cup.jpg
 catalog: true
 tags:
     - RAC
