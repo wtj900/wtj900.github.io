@@ -395,7 +395,11 @@ sendError和sendCompleted也都是同理。
 5. RACDynamicSignal调用didSubscribe闭包。先调用RACPassthroughSubscriber的相应的sendNext，sendError，sendCompleted方法。
 6. RACPassthroughSubscriber再去调用self.innerSubscriber，即RACSubscriber的nextBlock，errorBlock，completedBlock。注意这里调用同样是先copy一份，再调用闭包执行。
 
-## bind操作
+
+## 基础操作
+### bind（变换）
+
+概要：变换操作，可以对原始信号的值进行变换。
 
 在RACSignal的源码里面包含了两个基本操作，concat和zipWith。不过在分析这两个操作之前，先来分析一下更加核心的一个函数，bind操作。
 
@@ -626,7 +630,9 @@ sendError和sendCompleted也都是同理。
 
 bind整个流程就完成了。
 
-## concat操作
+### concat（组合）
+
+概要：组合操作，先发送第一个信号，再发送第二个信号。
 
 写出测试代码：
 
@@ -704,7 +710,9 @@ concat操作就是把两个信号合并起来。注意合并有先后顺序。
 * 只有当第一个信号完成之后才能收到第二个信号的值，因为第二个信号是在第一个信号completed的闭包里面订阅的，所以第一个信号不结束，第二个信号也不会被订阅。
 * 两个信号concat在一起之后，新的信号的结束信号在第二个信号结束的时候才结束。看上图描述，新的信号的发送长度等于前面两个信号长度之和，concat之后的新信号的结束信号也就是第二个信号的结束信号。
 
-## zipWith操作
+### zipWith（拉链）
+
+概要：拉链操作，两个信号从开始一一匹配，只发送匹配完成的数据。
 
 写出测试代码：
 
@@ -847,7 +855,23 @@ zipWith里面有两个数组，分别会存储两个信号的值。
 
 第一个信号依次发送的1，2，3，4的值和第二个信号依次发送的A，B，C，D的值，一一的合在了一起，就像拉链把他们拉在一起。由于5没法配对，所以拉链也拉不上了。
 
+## 变换操作
 
+## 时间操作
+
+## 过滤操作
+
+## 组合操作
+
+## 高阶信号操作
+
+## 同步操作
+
+## 副作用操作
+
+## 多线程操作
+
+## 其他操作
 
 
 
