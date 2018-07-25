@@ -44,6 +44,8 @@ OC中编程原来消息传递机制有以下几种：Delegate，Block Callback�
 
 # RAC中的核心RACSignal
 
+## 信号的订阅和发送
+
 `ReactiveCocoa`中最核心的概念之一就是信号`RACStream`。`RACStream`中有两个子类——`RACSignal`和`RACSequence`。下面先来分析`RACSignal`。
 
 我们会经常看到以下的代码：
@@ -392,6 +394,465 @@ sendError和sendCompleted也都是同理。
 4. 新建RACCompoundDisposable和RACPassthroughSubscriber对象。RACPassthroughSubscriber分别保存对RACSignal，RACSubscriber，RACCompoundDisposable的引用，注意对RACSignal的引用是unsafe_unretained的。
 5. RACDynamicSignal调用didSubscribe闭包。先调用RACPassthroughSubscriber的相应的sendNext，sendError，sendCompleted方法。
 6. RACPassthroughSubscriber再去调用self.innerSubscriber，即RACSubscriber的nextBlock，errorBlock，completedBlock。注意这里调用同样是先copy一份，再调用闭包执行。
+
+## bind操作
+
+在RACSignal的源码里面包含了两个基本操作，concat和zipWith。不过在分析这两个操作之前，先来分析一下更加核心的一个函数，bind操作。
+
+先来说说bind函数的作用：
+
+1. 会订阅原始的信号。
+2. 任何时刻原始信号发送一个值，都会在绑定的block转换一次。
+3. 一旦绑定的block转换了值变成信号，就立即订阅，并把值发给订阅者subscriber。
+4. 一旦绑定的block要终止绑定，原始的信号就complete。
+5. 当所有的信号都complete，发送completed信号给订阅者subscriber。
+6. 如果中途信号出现了任何error，都要把这个错误发送给subscriber
+
+```
+- (RACSignal *)bind:(RACStreamBindBlock (^)(void))block {
+	NSCParameterAssert(block != NULL);
+
+	/*
+	 * -bind: should:
+	 * 
+	 * 1. Subscribe to the original signal of values.
+	 * 2. Any time the original signal sends a value, transform it using the binding block.
+	 * 3. If the binding block returns a signal, subscribe to it, and pass all of its values through to the subscriber as they're received.
+	 * 4. If the binding block asks the bind to terminate, complete the _original_ signal.
+	 * 5. When _all_ signals complete, send completed to the subscriber.
+	 * 
+	 * If any signal sends an error at any point, send that to the subscriber.
+	 */
+
+	return [[RACSignal createSignal:^(id<RACSubscriber> subscriber) {
+		RACStreamBindBlock bindingBlock = block();
+
+		NSMutableArray *signals = [NSMutableArray arrayWithObject:self];
+
+		RACCompoundDisposable *compoundDisposable = [RACCompoundDisposable compoundDisposable];
+
+		void (^completeSignal)(RACSignal *, RACDisposable *) = ^(RACSignal *signal, RACDisposable *finishedDisposable) {
+			BOOL removeDisposable = NO;
+
+			@synchronized (signals) {
+				[signals removeObject:signal];
+
+				if (signals.count == 0) {
+					[subscriber sendCompleted];
+					[compoundDisposable dispose];
+				} else {
+					removeDisposable = YES;
+				}
+			}
+
+			if (removeDisposable) [compoundDisposable removeDisposable:finishedDisposable];
+		};
+
+		void (^addSignal)(RACSignal *) = ^(RACSignal *signal) {
+			@synchronized (signals) {
+				[signals addObject:signal];
+			}
+
+			RACSerialDisposable *selfDisposable = [[RACSerialDisposable alloc] init];
+			[compoundDisposable addDisposable:selfDisposable];
+
+			RACDisposable *disposable = [signal subscribeNext:^(id x) {
+				[subscriber sendNext:x];
+			} error:^(NSError *error) {
+				[compoundDisposable dispose];
+				[subscriber sendError:error];
+			} completed:^{
+				@autoreleasepool {
+					completeSignal(signal, selfDisposable);
+				}
+			}];
+
+			selfDisposable.disposable = disposable;
+		};
+
+		@autoreleasepool {
+			RACSerialDisposable *selfDisposable = [[RACSerialDisposable alloc] init];
+			[compoundDisposable addDisposable:selfDisposable];
+
+			RACDisposable *bindingDisposable = [self subscribeNext:^(id x) {
+				// Manually check disposal to handle synchronous errors.
+				if (compoundDisposable.disposed) return;
+
+				BOOL stop = NO;
+				id signal = bindingBlock(x, &stop);
+
+				@autoreleasepool {
+					if (signal != nil) addSignal(signal);
+					if (signal == nil || stop) {
+						[selfDisposable dispose];
+						completeSignal(self, selfDisposable);
+					}
+				}
+			} error:^(NSError *error) {
+				[compoundDisposable dispose];
+				[subscriber sendError:error];
+			} completed:^{
+				@autoreleasepool {
+					completeSignal(self, selfDisposable);
+				}
+			}];
+
+			selfDisposable.disposable = bindingDisposable;
+		}
+
+		return compoundDisposable;
+	}] setNameWithFormat:@"[%@] -bind:", self.name];
+}
+```
+
+为了弄清楚bind函数究竟做了什么，写出测试代码：
+
+```
+ RACSignal *signal = [RACSignal createSignal:
+                         ^RACDisposable *(id subscriber)
+    {
+        [subscriber sendNext:@1];
+        [subscriber sendNext:@2];
+        [subscriber sendNext:@3];
+        [subscriber sendCompleted];
+        return [RACDisposable disposableWithBlock:^{
+            NSLog(@"signal dispose");
+        }];
+    }];
+
+    RACSignal *bindSignal = [signal bind:^RACStreamBindBlock{
+        return ^RACSignal *(NSNumber *value, BOOL *stop){
+            value = @(value.integerValue * 2);
+            return [RACSignal return:value];
+        };
+    }];
+
+    [bindSignal subscribeNext:^(id x) {
+        NSLog(@"subscribe value = %@", x);
+    }];
+```
+
+由于前面第一章节详细讲解了RACSignal的创建和订阅的全过程，这个也为了方法讲解，创建RACDynamicSignal，RACCompoundDisposable，RACPassthroughSubscriber这些都略过，这里着重分析一下bind的各个闭包传递创建和订阅的过程。
+
+为了防止接下来的分析会让读者看晕，这里先把要用到的block进行编号。
+
+```
+    RACSignal *signal = [RACSignal createSignal:
+                         ^RACDisposable *(id subscriber)
+    {
+        // block 1
+    }
+
+    RACSignal *bindSignal = [signal bind:^RACStreamBindBlock{
+        // block 2
+        return ^RACSignal *(NSNumber *value, BOOL *stop){
+            // block 3
+        };
+    }];
+
+    [bindSignal subscribeNext:^(id x) {
+        // block 4
+    }];
+
+- (RACSignal *)bind:(RACStreamBindBlock (^)(void))block {
+        // block 5
+    return [[RACSignal createSignal:^(id subscriber) {
+        // block 6
+        RACStreamBindBlock bindingBlock = block();
+        NSMutableArray *signals = [NSMutableArray arrayWithObject:self];
+
+        void (^completeSignal)(RACSignal *, RACDisposable *) = ^(RACSignal *signal, RACDisposable *finishedDisposable) {
+        // block 7
+        };
+
+        void (^addSignal)(RACSignal *) = ^(RACSignal *signal) {
+        // block 8
+            RACDisposable *disposable = [signal subscribeNext:^(id x) {
+            // block 9
+            }];
+        };
+
+        @autoreleasepool {
+            RACDisposable *bindingDisposable = [self subscribeNext:^(id x) {
+                // block 10
+                id signal = bindingBlock(x, &stop);
+
+                @autoreleasepool {
+                    if (signal != nil) addSignal(signal);
+                    if (signal == nil || stop) {
+                        [selfDisposable dispose];
+                        completeSignal(self, selfDisposable);
+                    }
+                }
+            } error:^(NSError *error) {
+                [compoundDisposable dispose];
+                [subscriber sendError:error];
+            } completed:^{
+                @autoreleasepool {
+                    completeSignal(self, selfDisposable);
+                }
+            }];
+        }
+        return compoundDisposable;
+    }] ;
+}
+```
+
+1. 先创建信号signal，didSubscribe把block1 copy保存起来。
+
+2. 当信号调用bind进行绑定，会调用block5，didSubscribe把block6 copy保存起来。
+
+3. 当订阅者开始订阅bindSignal的时候，流程如下：
+
+  * bindSignal执行didSubscribe的block，即执行block6。
+  
+  * 在block6 的第一句代码，就是调用RACStreamBindBlock bindingBlock = block()，这里的block是外面传进来的block2，于是开始调用block2。执行完block2，会返回一个RACStreamBindBlock的对象。
+  
+  * 由于是signal调用的bind函数，所以bind函数里面的self就是signal，在bind内部订阅了signal的信号。subscribeNext所以会执行block1。
+  
+  * 执行block1，sendNext调用订阅者subscriber的nextBlock，于是开始执行block10。
+  
+  * block10中会先调用bindingBlock，这个是之前调用block2的返回值，这个RACStreamBindBlock对象里面保存的是block3。所以开始调用block3。
+
+  * 在block3中入参是一个value，这个value是signal中sendNext中发出来的value的值，在block3中可以对value进行变换，变换完成后，返回一个新的信号signal’。
+  
+  * 如果返回的signal’为空，则会调用completeSignal，即调用block7。block7中会发送sendCompleted。如果返回的signal’不为空，则会调用addSignal，即调用block8。block8中会继续订阅signal’。执行block9。
+
+  * block9 中会sendNext，这里的subscriber是block6的入参，于是对subscriber调用sendNext，会调用到bindSignal的订阅者的block4中。
+  
+  * block9 中执行完sendNext，还会调用sendCompleted。这里的是在执行block9里面的completed闭包。completeSignal(signal, selfDisposable);然后又会调用completeSignal，即block7。
+
+  * 执行完block7，就完成了一次从signal 发送信号sendNext的全过程。
+
+bind整个流程就完成了。
+
+## concat操作
+
+写出测试代码：
+
+```
+    RACSignal *signal = [RACSignal createSignal:
+                         ^RACDisposable *(id subscriber)
+    {
+        [subscriber sendNext:@1];
+        [subscriber sendCompleted];
+        return [RACDisposable disposableWithBlock:^{
+            NSLog(@"signal dispose");
+        }];
+    }];
+
+
+    RACSignal *signals = [RACSignal createSignal:
+                         ^RACDisposable *(id subscriber)
+    {
+        [subscriber sendNext:@2];
+        [subscriber sendNext:@3];
+        [subscriber sendNext:@6];
+        [subscriber sendCompleted];
+        return [RACDisposable disposableWithBlock:^{
+            NSLog(@"signal dispose");
+        }];
+    }];
+
+    RACSignal *concatSignal = [signal concat:signals];
+
+    [concatSignal subscribeNext:^(id x) {
+        NSLog(@"subscribe value = %@", x);
+    }];
+```
+
+concat操作就是把两个信号合并起来。注意合并有先后顺序。
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-concat.png)
+
+```
+- (RACSignal *)concat:(RACSignal *)signal {
+	return [[RACSignal createSignal:^(id<RACSubscriber> subscriber) {
+		RACSerialDisposable *serialDisposable = [[RACSerialDisposable alloc] init];
+
+		RACDisposable *sourceDisposable = [self subscribeNext:^(id x) {
+			[subscriber sendNext:x];
+		} error:^(NSError *error) {
+			[subscriber sendError:error];
+		} completed:^{
+			RACDisposable *concattedDisposable = [signal subscribe:subscriber];
+			serialDisposable.disposable = concattedDisposable;
+		}];
+
+		serialDisposable.disposable = sourceDisposable;
+		return serialDisposable;
+	}] setNameWithFormat:@"[%@] -concat: %@", self.name, signal];
+}
+```
+
+合并前，signal和signals分别都把各自的didSubscribe保存copy起来。
+
+合并之后，合并之后新的信号的didSubscribe会把block保存copy起来。
+
+当合并之后的信号被订阅的时候：
+
+* 调用新的合并信号的didSubscribe。
+* 由于是第一个信号调用的concat方法，所以block中的self是前一个信号signal。合并信号的didSubscribe会先订阅signal。
+* 由于订阅了signal，于是开始执行signal的didSubscribe，sendNext，sendError。
+* 当前一个信号signal发送sendCompleted之后，就会开始订阅后一个信号signals，调用signals的didSubscribe。
+* 由于订阅了后一个信号，于是后一个信号signals开始发送sendNext，sendError，sendCompleted。
+
+这样两个信号就前后有序的拼接到了一起。
+
+这里有二点需要注意的是：
+
+* 只有当第一个信号完成之后才能收到第二个信号的值，因为第二个信号是在第一个信号completed的闭包里面订阅的，所以第一个信号不结束，第二个信号也不会被订阅。
+* 两个信号concat在一起之后，新的信号的结束信号在第二个信号结束的时候才结束。看上图描述，新的信号的发送长度等于前面两个信号长度之和，concat之后的新信号的结束信号也就是第二个信号的结束信号。
+
+## zipWith操作
+
+写出测试代码：
+
+```
+RACSignal *signal = [RACSignal createSignal:
+                         ^RACDisposable *(id subscriber)
+                         {
+                             [subscriber sendNext:@1];
+                             [subscriber sendNext:@2];
+                             [subscriber sendNext:@3];
+                             [subscriber sendNext:@4];
+                             [subscriber sendNext:@5];
+                             [subscriber sendCompleted];
+                             return [RACDisposable disposableWithBlock:^{
+                                 NSLog(@"signal dispose----");
+                             }];
+                         }];
+    
+    
+    RACSignal *signals = [RACSignal createSignal:
+                          ^RACDisposable *(id subscriber)
+                          {
+                              [subscriber sendNext:@"A"];
+                              [subscriber sendNext:@"B"];
+                              [subscriber sendNext:@"C"];
+                              [subscriber sendNext:@"D"];
+                              [subscriber sendCompleted];
+                              return [RACDisposable disposableWithBlock:^{
+                                  NSLog(@"signal dispose++++");
+                              }];
+                          }];
+    
+    RACSignal *zipSignal = [signal zipWith:signals];
+    
+    [zipSignal subscribeNext:^(id x) {
+        NSLog(@"subscribe value = %@", x);
+    }];
+```
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-zip.png)
+
+```
+- (RACSignal *)zipWith:(RACSignal *)signal {
+    NSCParameterAssert(signal != nil);
+
+    return [[RACSignal createSignal:^(id subscriber) {
+        __block BOOL selfCompleted = NO;
+        NSMutableArray *selfValues = [NSMutableArray array];
+
+        __block BOOL otherCompleted = NO;
+        NSMutableArray *otherValues = [NSMutableArray array];
+
+        void (^sendCompletedIfNecessary)(void) = ^{
+            @synchronized (selfValues) {
+                BOOL selfEmpty = (selfCompleted && selfValues.count == 0);
+                BOOL otherEmpty = (otherCompleted && otherValues.count == 0);
+
+                // 如果任意一个信号完成并且数组里面空了，就整个信号算完成
+                if (selfEmpty || otherEmpty) [subscriber sendCompleted];
+            }
+        };
+
+        void (^sendNext)(void) = ^{
+            @synchronized (selfValues) {
+
+                // 数组里面的空了就返回。
+                if (selfValues.count == 0) return;
+                if (otherValues.count == 0) return;
+
+                // 每次都取出两个数组里面的第0位的值，打包成元组
+                RACTuple *tuple = RACTuplePack(selfValues[0], otherValues[0]);
+                [selfValues removeObjectAtIndex:0];
+                [otherValues removeObjectAtIndex:0];
+
+                // 把元组发送出去
+                [subscriber sendNext:tuple];
+                sendCompletedIfNecessary();
+            }
+        };
+
+        // 订阅第一个信号
+        RACDisposable *selfDisposable = [self subscribeNext:^(id x) {
+            @synchronized (selfValues) {
+
+                // 把第一个信号的值加入到数组中
+                [selfValues addObject:x ?: RACTupleNil.tupleNil];
+                sendNext();
+            }
+        } error:^(NSError *error) {
+            [subscriber sendError:error];
+        } completed:^{
+            @synchronized (selfValues) {
+
+                // 订阅完成时判断是否要发送完成信号
+                selfCompleted = YES;
+                sendCompletedIfNecessary();
+            }
+        }];
+
+        // 订阅第二个信号
+        RACDisposable *otherDisposable = [signal subscribeNext:^(id x) {
+            @synchronized (selfValues) {
+
+                // 把第二个信号加入到数组中
+                [otherValues addObject:x ?: RACTupleNil.tupleNil];
+                sendNext();
+            }
+        } error:^(NSError *error) {
+            [subscriber sendError:error];
+        } completed:^{
+            @synchronized (selfValues) {
+
+                // 订阅完成时判断是否要发送完成信号
+                otherCompleted = YES;
+                sendCompletedIfNecessary();
+            }
+        }];
+
+        return [RACDisposable disposableWithBlock:^{
+
+            // 销毁两个信号
+            [selfDisposable dispose];
+            [otherDisposable dispose];
+        }];
+    }] setNameWithFormat:@"[%@] -zipWith: %@", self.name, signal];
+}
+```
+
+当把两个信号通过zipWith之后，就像上面的那张图一样，拉链的两边被中间的拉索拉到了一起。既然是拉链，那么一一的位置是有对应的，上面的拉链第一个位置只能对着下面拉链第一个位置，这样拉链才能拉到一起去。
+
+具体实现：
+
+zipWith里面有两个数组，分别会存储两个信号的值。
+
+* 一旦订阅了zipWith之后的信号，就开始执行didSubscribe闭包。
+* 在闭包中会先订阅第一个信号。这里假设第一个信号比第二个信号先发出一个值。第一个信号发出来的每一个值都会被加入到第一个数组中保存起来，然后调用sendNext( )闭包。在sendNext( )闭包中，会先判断两个数组里面是否都为空，如果有一个数组里面是空的，就return。由于第二个信号还没有发送值，即第二个信号的数组里面是空的，所以这里第一个值发送不出来。于是第一个信号被订阅之后，发送的值存储到了第一个数组里面了，没有发出去。
+* 第二个信号的值紧接着发出来了，第二个信号每发送一次值，也会存储到第二个数组中，但是这个时候再调用sendNext( )闭包的时候，不会再return了，因为两个数组里面都有值了，两个数组的第0号位置都有一个值了。有值以后就打包成元组RACTuple发送出去。并清空两个数组0号位置存储的值。
+* 以后两个信号每次发送一个，就先存储在数组中，只要有“配对”的另一个信号，就一起打包成元组RACTuple发送出去。从图中也可以看出，zipWith之后的新信号，每个信号的发送时刻是等于两个信号最晚发出信号的时刻。
+* 新信号的完成时间，是当两者任意一个信号完成并且数组里面为空，就算完成了。所以最后第一个信号发送的5的那个值就被丢弃了。
+
+第一个信号依次发送的1，2，3，4的值和第二个信号依次发送的A，B，C，D的值，一一的合在了一起，就像拉链把他们拉在一起。由于5没法配对，所以拉链也拉不上了。
+
+
+
+
+
+
+
 
 
 
