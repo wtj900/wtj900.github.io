@@ -10,214 +10,394 @@ tags:
     - RAC
 ---
 
+# 前言
+
+`ReactiveCocoa`是一个将函数响应式编程范例带入`Objective-C`的开源库。`ReactiveCocoa`是由`Josh Abernathy`和`Justin Spahr-Summers`两位大神在对`GitHub for Mac`的开发过程中编写的。`Justin Spahr-Summers`大神在2011年11月13号下午12点35分进行的第一次提交，直到2013年2月13日上午3点05分发布了其1.0 release，达到了第一个重要里程碑。`ReactiveCocoa`社区也非常活跃，目前最新版已经完成了`ReactiveCocoa 5.0.0-alpha.3`，目前在`5.0.0-alpha.4`开发中。
+
+`ReactiveCocoa v2.5`是公认的`Objective-C`最稳定的版本，因此被广大的以OC为主要语言的客户端选中使用。`ReactiveCocoa v3.x`主要是基于`Swift 1.2`的版本，而`ReactiveCocoa v4.x`主要基于`Swift 2.x`，`ReactiveCocoa 5.0`就全面支持`Swift 3.0`，也许还有以后的`Swift 4.0`。接下来几篇博客先以`ReactiveCocoa v2.5`版本为例子，分析一下OC版的RAC具体实现（也许分析完了`RAC 5.0`就到来了）。也算是写在`ReactiveCocoa 5.0`正式版到来前夕的祝福吧。
 
 
+# 什么是ReactiveCocoa？
+
+`ReactiveCocoa`（其简称为RAC）是由Github 开源的一个应用于iOS和OS X开发的新框架。RAC具有函数式编程(FP)和响应式编程(RP)的特性。它主要吸取了`.Net`的`Reactive Extensions`的设计和实现。
+
+`ReactiveCocoa`的宗旨是`Streams of values over time`，随着时间变化而不断流动的数据流。
+
+`ReactiveCocoa`主要解决了以下这些问题：
+
+* UI数据绑定
+
+UI控件通常需要绑定一个事件，RAC可以很方便的绑定任何数据流到控件上。
+
+* 用户交互事件绑定
+
+RAC为可交互的UI控件提供了一系列能发送Signal信号的方法。这些数据流会在用户交互中相互传递。
+
+* 解决状态以及状态之间依赖过多的问题
+
+有了RAC的绑定之后，可以不用在关心各种复杂的状态，isSelect，isFinish……也解决了这些状态在后期很难维护的问题。
+
+* 消息传递机制的大统一
+
+OC中编程原来消息传递机制有以下几种：Delegate，Block Callback，Target-Action，Timers，KVO，objc上有一篇关于OC中这5种消息传递方式改如何选择的文章Communication Patterns，推荐大家阅读。现在有了RAC之后，以上这5种方式都可以统一用RAC来处理。
 
 
+# RAC中的核心RACSignal
 
-appledoc是最年轻的一个，并且只为Objective-C服务（很专一），能生成和Apple一个风格的文档，功能齐全，使用方便，还可以直接编译成docset安装进xcode。。看样子除了语言支持太少，其他的表现都不错，关键是最贴合Xcode。 虽然没有统计数据，但我相信ObjC这个用的人应该是最多的。 
+`ReactiveCocoa`中最核心的概念之一就是信号`RACStream`。`RACStream`中有两个子类——`RACSignal`和`RACSequence`。下面先来分析`RACSignal`。
 
-[Github项目链接](https://github.com/tomaz/appledoc)
-
-
-# 安装
-
-## 正常安装
-
-```
-git clone git://github.com/tomaz/appledoc.git
-cd ./appledoc
-sudo sh install-appledoc.sh
-```
-
-## Homebrew
-
-`brew install appledoc`
-
-## 自己编译
-
-去Github把工程clone下来，用Xcode打开，然后随便搞。
-
-## 更新
-
-`git pull`
-
-之后重新编译一遍appledoc.xcodeproj
-
-> 安装完成后，验证一下OK了没: `appledoc --version`
-
-# 使用
-
-进入code所在目录，跑一下下面的命令，默认会编译出docset并安装进Xcode。
-
-`appledoc --project-name MyProject --project-company ibireme ./`
-
-如果想要详细的参数，可以查看帮助
-
-`appledoc --help`
-
-如果想要集成进Xcode工程:
-
-1. 选中你的工程,点击Add Target按钮,选择 Other -> Aggregate模板新建.
-2. 点击Add Build Phase按钮,添加一个Run Script.
-3. 把下面的模板代码复制进去,把前几行参数改成你自己的.
-4. 在Xcode左上角选择这个新建的Target,然后点击build.
-5. 文档就会编译好并且自动安装进Xcode了(重启Xcode生效).
+我们会经常看到以下的代码：
 
 ```
-#appledoc Xcode script  
-# Start constants  
-company="ACME";  
-companyID="com.ACME";
-companyURL="http://ACME.com";
-target="iphoneos";
-#target="macosx";
-outputPath="~/help";
-# End constants
+RACSignal *signal = [RACSignal createSignal:
+                     ^RACDisposable *(id subscriber)
+{
+    [subscriber sendNext:@1];
+    [subscriber sendNext:@2];
+    [subscriber sendNext:@3];
+    [subscriber sendCompleted];
+    return [RACDisposable disposableWithBlock:^{
+        NSLog(@"signal dispose");
+    }];
+}];
+RACDisposable *disposable = [signal subscribeNext:^(id x) {
+    NSLog(@"subscribe value = %@", x);
+} error:^(NSError *error) {
+    NSLog(@"error: %@", error);
+} completed:^{
+    NSLog(@"completed");
+}];
  
-/usr/local/bin/appledoc \
---project-name "${PROJECT_NAME}" \
---project-company "${company}" \
---company-id "${companyID}" \
---docset-atom-filename "${company}.atom" \
---docset-feed-url "${companyURL}/${company}/%DOCSETATOMFILENAME" \
---docset-package-url "${companyURL}/${company}/%DOCSETPACKAGEFILENAME" \
---docset-fallback-url "${companyURL}/${company}" \
---output "${outputPath}" \
---publish-docset \
---docset-platform-family "${target}" \
---logformat xcode \
---keep-intermediate-files \
---no-repeat-first-par \
---no-warn-invalid-crossref \
---exit-threshold 2 \
-"${PROJECT_DIR}"
+[disposable dispose];
 ```
 
-# 语法
-
-appledoc官方原来是有一篇语法的，但是现在貌似维护中了。。所以这里尽量多介绍一下。
-
-首先，文档中的注释只有符合规范，才能被appledoc认可。
-
-凡是以 “///”、”/**”或”/*!”开头的注释块，都算所appledoc注释。下面是示例:
+这是一个RACSignal被订阅的完整过程。被订阅的过程中，究竟发生了什么？
 
 ```
-/// 这是单行注释。
- 
-/** 这也是单行注释 */
- 
-/*! 同样是单行注释 */
- 
-/** 这也是单行注释，
- *  第二行会接上第一行。
- */
++ (RACSignal *)createSignal:(RACDisposable * (^)(id<RACSubscriber> subscriber))didSubscribe {
+	return [RACDynamicSignal createSignal:didSubscribe];
+}
 ```
 
-注释块中，每一行开头的空格和”*”字符多数情况都会被appledoc忽略。
-连续的两行(即没有间隔空行)的注释，将被合并成一个段落，并忽略换行，就像html。
+RACSignal调用createSignal的时候，会调用RACDynamicSignal的createSignal的方法。
 
-在注释块内，appledoc支持如下语法：Markdown、HTML、HeaderDoc Tags。
+![](https://wtj900.github.io/img/RAC/RAC-Stream-tree.png)
 
-Markdown的语法在这里有介绍(中文翻译)，用Github的童鞋应该很熟悉。OSX上可以用Mou实时查看效果，Chrome也有一个插件来实时查看效果。这个东西可以说一看就会，学习成本很低。Markdown有很多方言，而且appledoc支持的也不算完整。所以用的时候可以试着在appledoc编译一下看看效果。
+RACDynamicSignal是RACSignal的子类。createSignal后面的参数是一个block。
 
-HTML这个就不用说了，支持Markdown肯定也支持HTML。。如果想要把控住更多细节，那就直接码Html吧。
+`(RACDisposable * (^)(id<RACSubscriber> subscriber))didSubscribe`
 
-HeaderDoc Tags这个东西是苹果的HeaderDoc工具的语法。详情可以见官网文档。例如@param、@return、@warning这样的东西，appledoc会进行解释。当然appledoc对这个东西的支持也不算完整 :?: 所以用的时候也要尝试一下。
+block的返回值是RACDisposable类型，block名叫didSubscribe。block的唯一一个参数是id类型的subscriber，这个subscriber是必须遵循RACSubscriber协议的。
 
-下面是一些常用的语法示意:
+RACSubscriber是一个协议，其下有以下4个协议方法：
 
 ```
-/** 第一行是类的简介
- 
- 在简介的下面,就是类的详细介绍了。
- 没有间隔换行会被消除，就像Html那样。
- 
- 下面是常用的markdown语法
- 
- - - -
- 
- 无序列表: (每行以 '*'、'-'、'+' 开头):
- 
- * this is the first line
- * this is the second line
- * this is the third line
- 
- 有序列表: (每行以 1.2.3、a.b.c 开头):
- 
- a. this is the first line
- b. this is the secode line
- 
- 多级列表:
- 
- * this is the first line
-    a. this is line a
-    b. this is line b
- * this is the second line
-    1. this in line 1
-    2. this is line 2
- 
- 标题:
- 
- # This is an H1
- ## This is an H2
- ### This is an H3
- #### This is an h4
- ##### This is an h5
- ###### This is an H6
- 
- 链接:
- 
- 普通URL直接写上，appledoc会自动翻译成链接: https://blog.ibireme.com
- 
- [这个](http://example.net/) 链接会隐藏实际URL.
- 
- 表格:
- 
- | header1 | header2 | header3 |
- |---------|:-------:|--------:|
- | normal  |  center |  right  |
- | cell    | cell    | cell    |
- 
- 引用:
- 
- 这里会引用到方法 `someMethod:`，这里会引用到类 `YYColor`
- 
- 这里会引用到一个代码块
- 
-     void CMYK2RGB(float c, float m, float y, float k, 
-                    float *r, float *g, float *b) {
-         *r = (1 - c) * (1 - k);
-         *g = (1 - m) * (1 - k);
-         *b = (1 - y) * (1 - k);
-     }
- 
- @since iOS5.0
- 
- */
-@interface AppledocExample : NSObject
- 
-///这里是属性的说明
-@property (nonatomic, strong) NSString *name;
- 
-/** 
- @brief 这里是方法的简介。该Tag不能放到类注释里。
- @exception UIColorException 这里是方法抛出异常的说明
- @see YYColor
- @see someMethod:
- @warning 这里是警告，会显示成蓝色的框框
- @bug 这里是bug，会显示成黄色的框框
- @param red   这里是参数说明1
- @param green 这里是参数说明2
- @param blue   这里是参数说明3
- @return  这里是返回值说明
- */
-- (UIColor *)initWithRed:(int)red green:(int)green blue:(int)blue;
- 
-- (void)someMethod:(NSString *)str;
+@protocol RACSubscriber <NSObject>
+@required
+
+- (void)sendNext:(id)value;
+- (void)sendError:(NSError *)error;
+- (void)sendCompleted;
+- (void)didSubscribeWithDisposable:(RACCompoundDisposable *)disposable;
+
 @end
 ```
 
-[参考](https://blog.ibireme.com/2013/08/26/appledoc-guide/)
+所以新建Signal的任务就全部落在了RACSignal的子类RACDynamicSignal上了。
+
+```
+@interface RACDynamicSignal ()
+
+// The block to invoke for each subscriber.
+@property (nonatomic, copy, readonly) RACDisposable * (^didSubscribe)(id<RACSubscriber> subscriber);
+
+@end
+```
+
+RACDynamicSignal这个类很简单，里面就保存了一个名字叫didSubscribe的block。
+
+```
++ (RACSignal *)createSignal:(RACDisposable * (^)(id<RACSubscriber> subscriber))didSubscribe {
+	RACDynamicSignal *signal = [[self alloc] init];
+	signal->_didSubscribe = [didSubscribe copy];
+	return [signal setNameWithFormat:@"+createSignal:"];
+}
+```
+
+这个方法中新建了一个RACDynamicSignal对象signal，并把传进来的didSubscribe这个block保存进刚刚新建对象signal里面的didSubscribe属性中。最后再给signal命名+createSignal:。
+
+```
+- (instancetype)setNameWithFormat:(NSString *)format, ... {
+	if (getenv("RAC_DEBUG_SIGNAL_NAMES") == NULL) return self;
+
+	NSCParameterAssert(format != nil);
+
+	va_list args;
+	va_start(args, format);
+
+	NSString *str = [[NSString alloc] initWithFormat:format arguments:args];
+	va_end(args);
+
+	self.name = str;
+	return self;
+}
+```
+
+setNameWithFormat是RACStream里面的方法，由于RACDynamicSignal继承自RACSignal，所以它也能调用这个方法。
+
+RACSignal的block就这样被保存起来了，那什么时候会被执行呢？
+
+block闭包在订阅的时候才会被“释放”出来。
+
+RACSignal调用subscribeNext方法，返回一个RACDisposable。
+
+```
+- (RACDisposable *)subscribeNext:(void (^)(id x))nextBlock error:(void (^)(NSError *error))errorBlock completed:(void (^)(void))completedBlock {
+	NSCParameterAssert(nextBlock != NULL);
+	NSCParameterAssert(errorBlock != NULL);
+	NSCParameterAssert(completedBlock != NULL);
+	
+	RACSubscriber *o = [RACSubscriber subscriberWithNext:nextBlock error:errorBlock completed:completedBlock];
+	return [self subscribe:o];
+}
+```
+
+在这个方法中会新建一个RACSubscriber对象，并传入nextBlock，errorBlock，completedBlock。
+
+```
+@interface RACSubscriber ()
+
+// These callbacks should only be accessed while synchronized on self.
+@property (nonatomic, copy) void (^next)(id value);
+@property (nonatomic, copy) void (^error)(NSError *error);
+@property (nonatomic, copy) void (^completed)(void);
+
+@property (nonatomic, strong, readonly) RACCompoundDisposable *disposable;
+
+@end
+```
+
+RACSubscriber这个类很简单，里面只有4个属性，分别是nextBlock，errorBlock，completedBlock和一个RACCompoundDisposable信号。
+
+```
++ (instancetype)subscriberWithNext:(void (^)(id x))next error:(void (^)(NSError *error))error completed:(void (^)(void))completed {
+	RACSubscriber *subscriber = [[self alloc] init];
+
+	subscriber->_next = [next copy];
+	subscriber->_error = [error copy];
+	subscriber->_completed = [completed copy];
+
+	return subscriber;
+}
+```
+
+subscriberWithNext方法把传入的3个block都保存分别保存到自己对应的block中。
+
+RACSignal调用subscribeNext方法，最后return的时候，会调用[self subscribe:o]，这里实际是调用了RACDynamicSignal类里面的subscribe方法。
+
+```
+- (RACDisposable *)subscribe:(id<RACSubscriber>)subscriber {
+	NSCParameterAssert(subscriber != nil);
+
+	RACCompoundDisposable *disposable = [RACCompoundDisposable compoundDisposable];
+	subscriber = [[RACPassthroughSubscriber alloc] initWithSubscriber:subscriber signal:self disposable:disposable];
+
+	if (self.didSubscribe != NULL) {
+		RACDisposable *schedulingDisposable = [RACScheduler.subscriptionScheduler schedule:^{
+			RACDisposable *innerDisposable = self.didSubscribe(subscriber);
+			[disposable addDisposable:innerDisposable];
+		}];
+
+		[disposable addDisposable:schedulingDisposable];
+	}
+	
+	return disposable;
+}
+```
+
+RACDisposable有3个子类，其中一个就是RACCompoundDisposable。
+
+![](https://wtj900.github.io/img/RAC/RAC-Disposable-tree.png)
+
+```
+@interface RACCompoundDisposable : RACDisposable
+
++ (instancetype)compoundDisposable;
+
++ (instancetype)compoundDisposableWithDisposables:(NSArray *)disposables;
+
+- (void)addDisposable:(RACDisposable *)disposable;
+
+- (void)removeDisposable:(RACDisposable *)disposable;
+
+@end
+```
+
+RACCompoundDisposable虽然是RACDisposable的子类，但是它里面可以加入多个RACDisposable对象，在必要的时候可以一口气都调用dispose方法来销毁信号。当RACCompoundDisposable对象被dispose的时候，也会自动dispose容器内的所有RACDisposable对象。
+
+RACPassthroughSubscriber是一个私有的类。
+
+RACPassthroughSubscriber类就只有这一个方法。目的就是为了把所有的信号事件从一个订阅者subscriber传递给另一个还没有disposed的订阅者subscriber。
+
+RACPassthroughSubscriber类中保存了3个非常重要的对象，RACSubscriber，RACSignal，RACCompoundDisposable。RACSubscriber是待转发的信号的订阅者subscriber。RACCompoundDisposable是订阅者的销毁对象，一旦它被disposed了，innerSubscriber就再也接受不到事件流了。
+
+这里需要注意的是内部还保存了一个RACSignal，并且它的属性是unsafe_unretained。这里和其他两个属性有区别， 其他两个属性都是strong的。这里之所以不是weak，是因为引用RACSignal仅仅只是一个DTrace probes动态跟踪技术的探针。如果设置成weak，会造成没必要的性能损失。所以这里仅仅是unsafe_unretained就够了。
+
+```
+- (instancetype)initWithSubscriber:(id<RACSubscriber>)subscriber signal:(RACSignal *)signal disposable:(RACCompoundDisposable *)disposable {
+	NSCParameterAssert(subscriber != nil);
+
+	self = [super init];
+	if (self == nil) return nil;
+
+	_innerSubscriber = subscriber;
+	_signal = signal;
+	_disposable = disposable;
+
+	[self.innerSubscriber didSubscribeWithDisposable:self.disposable];
+	return self;
+}
+```
+
+回到RACDynamicSignal类里面的subscribe方法中，现在新建好了RACCompoundDisposable和RACPassthroughSubscriber对象了。
+
+RACScheduler.subscriptionScheduler是一个全局的单例。
+
+```
++ (instancetype)subscriptionScheduler {
+	static dispatch_once_t onceToken;
+	static RACScheduler *subscriptionScheduler;
+	dispatch_once(&onceToken, ^{
+		subscriptionScheduler = [[RACSubscriptionScheduler alloc] init];
+	});
+
+	return subscriptionScheduler;
+}
+```
+
+RACScheduler再继续调用schedule方法。
+
+```
+- (RACDisposable *)schedule:(void (^)(void))block {
+	NSCParameterAssert(block != NULL);
+
+	if (RACScheduler.currentScheduler == nil) return [self.backgroundScheduler schedule:block];
+
+	block();
+	return nil;
+}
+```
+
+```
++ (BOOL)isOnMainThread {
+	return [NSOperationQueue.currentQueue isEqual:NSOperationQueue.mainQueue] || [NSThread isMainThread];
+}
+
++ (instancetype)currentScheduler {
+	RACScheduler *scheduler = NSThread.currentThread.threadDictionary[RACSchedulerCurrentSchedulerKey];
+	if (scheduler != nil) return scheduler;
+	if ([self.class isOnMainThread]) return RACScheduler.mainThreadScheduler;
+
+	return nil;
+}
+```
+
+在取currentScheduler的过程中，会判断currentScheduler是否存在，和是否在主线程中。如果都没有，那么就会调用后台backgroundScheduler去执行schedule。
+
+schedule的入参就是一个block，执行schedule的时候会去执行block。也就是会去执行：
+
+```
+RACDisposable *innerDisposable = self.didSubscribe(subscriber);
+[disposable addDisposable:innerDisposable];
+```
+
+这两句关键的语句。之前信号里面保存的block就会在此处被“释放”执行。self.didSubscribe(subscriber)这一句就执行了信号保存的didSubscribe闭包。
+
+在didSubscribe闭包中有sendNext，sendError，sendCompleted，执行这些语句会分别调用RACPassthroughSubscriber里面对应的方法。
+
+```
+- (void)sendNext:(id)value {
+	if (self.disposable.disposed) return;
+
+	if (RACSIGNAL_NEXT_ENABLED()) {
+		RACSIGNAL_NEXT(cleanedSignalDescription(self.signal), cleanedDTraceString(self.innerSubscriber.description), cleanedDTraceString([value description]));
+	}
+
+	[self.innerSubscriber sendNext:value];
+}
+
+- (void)sendError:(NSError *)error {
+	if (self.disposable.disposed) return;
+
+	if (RACSIGNAL_ERROR_ENABLED()) {
+		RACSIGNAL_ERROR(cleanedSignalDescription(self.signal), cleanedDTraceString(self.innerSubscriber.description), cleanedDTraceString(error.description));
+	}
+
+	[self.innerSubscriber sendError:error];
+}
+
+- (void)sendCompleted {
+	if (self.disposable.disposed) return;
+
+	if (RACSIGNAL_COMPLETED_ENABLED()) {
+		RACSIGNAL_COMPLETED(cleanedSignalDescription(self.signal), cleanedDTraceString(self.innerSubscriber.description));
+	}
+
+	[self.innerSubscriber sendCompleted];
+}
+```
+
+这个时候的订阅者是RACPassthroughSubscriber。RACPassthroughSubscriber里面的innerSubscriber才是最终的实际订阅者，RACPassthroughSubscriber会把值再继续传递给innerSubscriber。
+
+```
+- (void)sendNext:(id)value {
+	@synchronized (self) {
+		void (^nextBlock)(id) = [self.next copy];
+		if (nextBlock == nil) return;
+
+		nextBlock(value);
+	}
+}
+
+- (void)sendError:(NSError *)e {
+	@synchronized (self) {
+		void (^errorBlock)(NSError *) = [self.error copy];
+		[self.disposable dispose];
+
+		if (errorBlock == nil) return;
+		errorBlock(e);
+	}
+}
+
+- (void)sendCompleted {
+	@synchronized (self) {
+		void (^completedBlock)(void) = [self.completed copy];
+		[self.disposable dispose];
+
+		if (completedBlock == nil) return;
+		completedBlock();
+	}
+}
+```
+
+innerSubscriber是RACSubscriber，调用sendNext的时候会先把自己的self.next闭包copy一份，再调用，而且整个过程还是线程安全的，用@synchronized保护着。最终订阅者的闭包在这里被调用。
+
+sendError和sendCompleted也都是同理。
+
+![](https://wtj900.github.io/img/RAC/RAC-subscribe-process.png)
+
+1. RACSignal调用subscribeNext方法，新建一个RACSubscriber。
+2. 新建的RACSubscriber会copy，nextBlock，errorBlock，completedBlock存在自己的属性变量中。
+3. RACSignal的子类RACDynamicSignal调用subscribe方法。
+4. 新建RACCompoundDisposable和RACPassthroughSubscriber对象。RACPassthroughSubscriber分别保存对RACSignal，RACSubscriber，RACCompoundDisposable的引用，注意对RACSignal的引用是unsafe_unretained的。
+5. RACDynamicSignal调用didSubscribe闭包。先调用RACPassthroughSubscriber的相应的sendNext，sendError，sendCompleted方法。
+6. RACPassthroughSubscriber再去调用self.innerSubscriber，即RACSubscriber的nextBlock，errorBlock，completedBlock。注意这里调用同样是先copy一份，再调用闭包执行。
+
+
+
+
+
+
+
 
 
