@@ -1745,9 +1745,25 @@ collect函数会调用aggregateWithStartFactory: reduce:方法。把所有原信
 
 ## 时间操作
 
-![](https://wtj900.github.io/img/RAC/RAC-stream-map.png)
+### 1. throttle:valuesPassingTest:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ## 过滤操作
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-map.png)
 
 ## 组合操作
 
