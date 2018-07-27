@@ -221,7 +221,7 @@ RACSignal调用subscribeNext方法，最后return的时候，会调用[self subs
 
 RACDisposable有3个子类，其中一个就是RACCompoundDisposable。
 
-![](https://wtj900.github.io/img/RAC/RAC-Disposable-tree.png)
+![](https://wtj900.github.io/img/RAC/RAC-disposable-tree.png)
 
 ```
 @interface RACCompoundDisposable : RACDisposable
@@ -1747,19 +1747,306 @@ collect函数会调用aggregateWithStartFactory: reduce:方法。把所有原信
 
 ### 1. throttle:valuesPassingTest:
 
+> throttle:节流，在确定的时间间隔中,发送一个信号,之后没有信号，时间结束时发出该信号；如果发送了一个新值，则旧值被丢弃，直到时间结束，发送最新的值；但是当闭包predicate不满足时，说明当前信号不屏蔽，直接输出。
 
+这个操作传入一个时间间隔NSTimeInterval，和一个判断条件的闭包predicate。原信号在一个时间间隔NSTimeInterval之间发送的信号，如果还能满足predicate，则原信号都被“吞”了，直到一个时间间隔NSTimeInterval结束，会再次判断predicate，如果不满足了，原信号就会被发送出来。
 
+![](https://wtj900.github.io/img/RAC/RAC-stream-throttle_valuesPassingTest.png)
 
+如上图，原信号发送1以后，间隔NSTimeInterval的时间内，没有信号发出，并且predicate也为YES，就把1变换成新的信号发出去。接下去由于原信号发送2，3，4的过程中，都在间隔NSTimeInterval的时间内，所以都被“吞”了。直到原信号发送5之后，间隔NSTimeInterval的时间内没有新的信号发出，所以把原信号的5发送出来。原信号的6也是如此。
 
+再来看看具体实现：
 
+```
+- (RACSignal *)throttle:(NSTimeInterval)interval valuesPassingTest:(BOOL (^)(id next))predicate {
+    NSCParameterAssert(interval >= 0);
+    NSCParameterAssert(predicate != nil);
+ 
+    return [[RACSignal createSignal:^(id subscriber) {
+        RACCompoundDisposable *compoundDisposable = [RACCompoundDisposable compoundDisposable];
+ 
+        RACScheduler *scheduler = [RACScheduler scheduler];
+ 
+        __block id nextValue = nil;
+        __block BOOL hasNextValue = NO;
+        RACSerialDisposable *nextDisposable = [[RACSerialDisposable alloc] init];
+ 
+        void (^flushNext)(BOOL send) = ^(BOOL send) { // 暂时省略 };
+ 
+        RACDisposable *subscriptionDisposable = [self subscribeNext:^(id x) {
+            // 暂时省略
+        } error:^(NSError *error) {
+            [compoundDisposable dispose];
+            [subscriber sendError:error];
+        } completed:^{
+            flushNext(YES);
+            [subscriber sendCompleted];
+        }];
+ 
+        [compoundDisposable addDisposable:subscriptionDisposable];
+        return compoundDisposable;
+    }] setNameWithFormat:@"[%@] -throttle: %f valuesPassingTest:", self.name, (double)interval];
+}
+```
 
+看这段实现，里面有2处断言。会先判断传入的interval是否大于0，小于0当然是不行的。还有一个就是传入的predicate闭包不能为空，这个是接下来用来控制流程的。
 
+接下来的实现还是按照套路来，返回值是一个信号，新信号的闭包里面再订阅原信号进行变换。
 
+那么整个变换的重点就落在了flushNext闭包和订阅原信号subscribeNext闭包中了。
 
+当新的信号一旦被订阅，闭包执行到此处，就会对原信号进行订阅。
 
+```
+[self subscribeNext:^(id x) {
+    RACScheduler *delayScheduler = RACScheduler.currentScheduler ?: scheduler;
+    BOOL shouldThrottle = predicate(x);
+ 
+    @synchronized (compoundDisposable) {   
+        flushNext(NO);
+        if (!shouldThrottle) {
+            [subscriber sendNext:x];
+            return;
+        }
+        nextValue = x;
+        hasNextValue = YES;
+        nextDisposable.disposable = [delayScheduler afterDelay:interval schedule:^{
+            flushNext(YES);
+        }];
+    }
+}
+```
 
+1. 首先先创建一个delayScheduler。先判断当前的currentScheduler是否存在，不存在就取之前创建的[RACScheduler scheduler]。这里虽然两处都是RACTargetQueueScheduler类型的，但是currentScheduler是com.ReactiveCocoa.RACScheduler.mainThreadScheduler，而[RACScheduler scheduler]创建的是com.ReactiveCocoa.RACScheduler.backgroundScheduler。
+2. 调用predicate( )闭包，传入原信号发来的信号值x，经过predicate判断以后，得到是否打开节流开关的BOOL变量shouldThrottle。
+3. 之所以把RACCompoundDisposable作为线程间互斥信号量，因为RACCompoundDisposable里面会加入所有的RACDisposable信号。接着下面的操作用@synchronized给线程间加锁。
+4. flushNext( )这个闭包是为了hook住原信号的发送。
 
+```
+void (^flushNext)(BOOL send) = ^(BOOL send) {
+    @synchronized (compoundDisposable) {
+        [nextDisposable.disposable dispose];
+ 
+        if (!hasNextValue) return;
+        if (send) [subscriber sendNext:nextValue];
+ 
+        nextValue = nil;
+        hasNextValue = NO;
+    }
+};
+```
 
+这个闭包中如果传入的是NO，那么原信号就无法立即sendNext。如果传入的是YES，并且hasNextValue = YES，原信号待发送的还有值，那么就发送原信号。
+
+shouldThrottle是一个阀门，随时控制原信号是否可以被发送。
+
+小结一下，每个原信号发送过来，通过在throttle:valuesPassingTest:里面的did subscriber闭包中进行订阅。这个闭包中主要干了4件事情：
+
+调用flushNext(NO)闭包判断能否发送原信号的值。入参为NO，不发送原信号的值。
+判断阀门条件predicate(x)能否发送原信号的值。
+如果以上两个条件都满足，nextValue中进行赋值为原信号发来的值，hasNextValue = YES代表当前有要发送的值。
+开启一个delayScheduler，延迟interval的时间，发送原信号的这个值，即调用flushNext(YES)。
+
+现在再来分析一下整个throttle:valuesPassingTest:的全过程
+
+原信号发出第一个值，如果在interval的时间间隔内，没有新的信号发送，那么delayScheduler延迟interval的时间，执行flushNext(YES)，发送原信号的这个第一个值。
+
+```
+- (RACDisposable *)afterDelay:(NSTimeInterval)delay schedule:(void (^)(void))block {
+    return [self after:[NSDate dateWithTimeIntervalSinceNow:delay] schedule:block];
+}
+ 
+- (RACDisposable *)after:(NSDate *)date schedule:(void (^)(void))block {
+    NSCParameterAssert(date != nil);
+    NSCParameterAssert(block != NULL);
+ 
+    RACDisposable *disposable = [[RACDisposable alloc] init];
+ 
+    dispatch_after([self.class wallTimeWithDate:date], self.queue, ^{
+        if (disposable.disposed) return;
+        [self performAsCurrentScheduler:block];
+    });
+ 
+    return disposable;
+}
+```
+
+注意，在dispatch_after闭包里面之前[self performAsCurrentScheduler:block]之前，有一个关键的判断：
+
+`if (disposable.disposed) return;`
+
+这个判断就是用来判断从第一个信号发出，在间隔interval的时间之内，还有没有其他信号存在。如果有，第一个信号肯定会disposed，这里会执行return，所以也就不会把第一个信号发送出来了。
+
+这样也就达到了节流的目的：原来每个信号都会创建一个delayScheduler，都会延迟interval的时间，在这个时间内，如果原信号再没有发送新值，即原信号没有disposed，就把原信号的值发出来；如果在这个时间内，原信号还发送了一个新值，那么第一个值就被丢弃。在发送过程中，每个信号都要判断一次predicate( )，这个是阀门的开关，如果随时都不节流了，原信号发的值就需要立即被发送出来。
+
+还有二点需要注意的是，第一点，正好在interval那一时刻，有新信号发送出来，原信号也会被丢弃，即只有在>=interval的时间之内，原信号没有发送新值，原来的这个值才能发送出来。第二点，原信号发送completed时，会立即执行flushNext(YES)，把原信号的最后一个值发送出来。
+
+### 2. throttle:
+
+```
+- (RACSignal *)throttle:(NSTimeInterval)interval {
+    return [[self throttle:interval valuesPassingTest:^(id _) {
+        return YES;
+    }] setNameWithFormat:@"[%@] -throttle: %f", self.name, (double)interval];
+}
+```
+
+这个操作其实就是调用了throttle:valuesPassingTest:方法，传入时间间隔interval，predicate( )闭包则永远返回YES，原信号的每个信号都执行节流操作。
+
+### 3. bufferWithTime:onScheduler:
+
+这个操作的实现是类似于throttle:valuesPassingTest:的实现。
+
+```
+- (RACSignal *)bufferWithTime:(NSTimeInterval)interval onScheduler:(RACScheduler *)scheduler {
+    NSCParameterAssert(scheduler != nil);
+    NSCParameterAssert(scheduler != RACScheduler.immediateScheduler);
+ 
+    return [[RACSignal createSignal:^(id subscriber) {
+        RACSerialDisposable *timerDisposable = [[RACSerialDisposable alloc] init];
+        NSMutableArray *values = [NSMutableArray array];
+ 
+        void (^flushValues)() = ^{
+            // 暂时省略
+        };
+ 
+        RACDisposable *selfDisposable = [self subscribeNext:^(id x) {
+            // 暂时省略
+        } error:^(NSError *error) {
+            [subscriber sendError:error];
+        } completed:^{
+            flushValues();
+            [subscriber sendCompleted];
+        }];
+ 
+        return [RACDisposable disposableWithBlock:^{
+            [selfDisposable dispose];
+            [timerDisposable dispose];
+        }];
+    }] setNameWithFormat:@"[%@] -bufferWithTime: %f onScheduler: %@", self.name, (double)interval, scheduler];
+}
+```
+
+bufferWithTime:onScheduler:的实现和throttle:valuesPassingTest:的实现给出类似。开始有2个断言，2个都是判断scheduler的，第一个断言是判断scheduler是否为nil。第二个断言是判断scheduler的类型的，scheduler类型不能是immediateScheduler类型的，因为这个方法是要缓存一些信号的，所以不能是immediateScheduler类型的。
+
+```
+RACDisposable *selfDisposable = [self subscribeNext:^(id x) {
+    @synchronized (values) {
+        if (values.count == 0) {
+            timerDisposable.disposable = [scheduler afterDelay:interval schedule:flushValues];
+        }
+        [values addObject:x ?: RACTupleNil.tupleNil];
+    }
+}
+```
+
+在subscribeNext中，当数组里面是没有存任何原信号的值，就会开启一个scheduler，延迟interval时间，执行flushValues闭包。如果里面有值了，就继续加到values的数组中。关键的也是闭包里面的内容，代码如下：
+
+```
+void (^flushValues)() = ^{
+    @synchronized (values) {
+        [timerDisposable.disposable dispose];
+ 
+        if (values.count == 0) return;
+ 
+        RACTuple *tuple = [RACTuple tupleWithObjectsFromArray:values];
+        [values removeAllObjects];
+        [subscriber sendNext:tuple];
+    }
+};
+```
+
+flushValues( )闭包里面主要是把数组包装成一个元组，并且全部发送出来，原数组里面就全部清空了。这也是bufferWithTime:onScheduler:的作用，在interval时间内，把这个时间间隔内的原信号都缓存起来，并且在interval的那一刻，把这些缓存的信号打包成一个元组，发送出来。
+
+和throttle:valuesPassingTest:方法一样，在原信号completed的时候，立即执行flushValues( )闭包，把里面存的值都发送出来。
+
+### 4. delay:
+
+delay:函数的操作和上面几个套路都是一样的，实现方式也都是模板式的，唯一的不同都在subscribeNext中，和一个判断是否发送的闭包中。
+
+```
+- (RACSignal *)delay:(NSTimeInterval)interval {
+    return [[RACSignal createSignal:^(id subscriber) {
+        RACCompoundDisposable *disposable = [RACCompoundDisposable compoundDisposable];
+
+        // We may never use this scheduler, but we need to set it up ahead of
+        // time so that our scheduled blocks are run serially if we do.
+        RACScheduler *scheduler = [RACScheduler scheduler];
+
+        void (^schedule)(dispatch_block_t) = ^(dispatch_block_t block) {
+            // 暂时省略
+        };
+
+        RACDisposable *subscriptionDisposable = [self subscribeNext:^(id x) {
+            // 暂时省略
+        } error:^(NSError *error) {
+            [subscriber sendError:error];
+        } completed:^{
+            schedule(^{
+                [subscriber sendCompleted];
+            });
+        }];
+
+        [disposable addDisposable:subscriptionDisposable];
+        return disposable;
+    }] setNameWithFormat:@"[%@] -delay: %f", self.name, (double)interval];
+}
+```
+
+在delay:的subscribeNext中，就单纯的执行了schedule的闭包。
+
+```
+RACDisposable *subscriptionDisposable = [self subscribeNext:^(id x) {
+            schedule(^{
+                [subscriber sendNext:x];
+            });
+        }
+```
+
+```
+void (^schedule)(dispatch_block_t) = ^(dispatch_block_t block) {
+          RACScheduler *delayScheduler = RACScheduler.currentScheduler ?: scheduler;
+          RACDisposable *schedulerDisposable = [delayScheduler afterDelay:interval schedule:block];
+          [disposable addDisposable:schedulerDisposable];
+      };
+```
+
+在schedule闭包中做的时间就是延迟interval的时间发送原信号的值。
+
+### 5. interval:onScheduler:withLeeway:
+
+```
++ (RACSignal *)interval:(NSTimeInterval)interval onScheduler:(RACScheduler *)scheduler withLeeway:(NSTimeInterval)leeway {
+    NSCParameterAssert(scheduler != nil);
+    NSCParameterAssert(scheduler != RACScheduler.immediateScheduler);
+ 
+    return [[RACSignal createSignal:^(id subscriber) {
+        return [scheduler after:[NSDate dateWithTimeIntervalSinceNow:interval] repeatingEvery:interval withLeeway:leeway schedule:^{
+            [subscriber sendNext:[NSDate date]];
+        }];
+    }] setNameWithFormat:@"+interval: %f onScheduler: %@ withLeeway: %f", (double)interval, scheduler, (double)leeway];
+}
+```
+
+在这个操作中，实现代码不难。先来看看2个断言，都是保护入参类型的，scheduler不能为空，且不能是immediateScheduler的类型，原因和上面是一样的，这里是延迟操作。
+
+主要的实现就在`after:repeatingEvery:withLeeway:schedule:`上了。
+
+这里的实现就是用GCD在self.queue上创建了一个Timer，时间间隔是interval，修正时间是leeway。
+
+leeway这个参数是为dispatch source指定一个期望的定时器事件精度，让系统能够灵活地管理并唤醒内核。例如系统可以使用leeway值来提前或延迟触发定时器，使其更好地与其它系统事件结合。创建自己的定时器时，应该尽量指定一个leeway值。不过就算指定leeway值为0，也不能完完全全期望定时器能够按照精确的纳秒来触发事件。
+
+这个定时器在interval执行sendNext操作，也就是发送原信号的值。
+
+### 6. interval:onScheduler:
+
+```
++ (RACSignal *)interval:(NSTimeInterval)interval onScheduler:(RACScheduler *)scheduler {
+    return [[RACSignal interval:interval onScheduler:scheduler withLeeway:0.0] setNameWithFormat:@"+interval: %f onScheduler: %@", (double)interval, scheduler];
+}
+```
+
+这个操作就是调用上一个方法interval:onScheduler:withLeeway:，只不过leeway = 0.0。具体实现上面已经分析过了，这里不再赘述。
 
 ## 过滤操作
 
