@@ -2050,7 +2050,571 @@ leeway这个参数是为dispatch source指定一个期望的定时器事件精�
 
 ## 过滤操作
 
-![](https://wtj900.github.io/img/RAC/RAC-stream-map.png)
+### 1. filter: 
+
+这个filter:操作在any:的实现中用到过了。
+
+```
+- (instancetype)filter:(BOOL (^)(id value))block {
+	NSCParameterAssert(block != nil);
+
+	Class class = self.class;
+	
+	return [[self flattenMap:^ id (id value) {
+		if (block(value)) {
+			return [class return:value];
+		} else {
+			return class.empty;
+		}
+	}] setNameWithFormat:@"[%@] -filter:", self.name];
+}
+```
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-filter.png)
+
+filter:中传入一个闭包，是用筛选的条件。如果满足筛选条件的即返回原信号的值，否则原信号的值被“吞”掉，返回空的信号。这个变换主要是用flattenMap的。
+
+### 2. ignoreValues
+
+```
+- (RACSignal *)ignoreValues {
+    return [[self filter:^(id _) {
+        return NO;
+    }] setNameWithFormat:@"[%@] -ignoreValues", self.name];
+}
+```
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-ignoreValue.png)
+
+由上面filter的实现，这里把筛选判断条件永远的传入NO，那么原信号的值都会被变换成empty信号，故变换之后的信号为空信号。
+
+### 3. ignore:
+
+```
+- (instancetype)ignore:(id)value {
+    return [[self filter:^ BOOL (id innerValue) {
+        return innerValue != value && ![innerValue isEqual:value];
+    }] setNameWithFormat:@"[%@] -ignore: %@", self.name, [value rac_description]];
+}
+```
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-ignore.png)
+
+ignore:的实现还是由filter:实现的。传入的筛选判断条件是一个值，当原信号发送的值中是这个值的时候，就替换成空信号。
+
+### 4. distinctUntilChanged
+
+```
+- (instancetype)distinctUntilChanged {
+    Class class = self.class;
+ 
+    return [[self bind:^{
+        __block id lastValue = nil;
+        __block BOOL initial = YES;
+ 
+        return ^(id x, BOOL *stop) {
+            if (!initial && (lastValue == x || [x isEqual:lastValue])) return [class empty];
+ 
+            initial = NO;
+            lastValue = x;
+            return [class return:x];
+        };
+    }] setNameWithFormat:@"[%@] -distinctUntilChanged", self.name];
+}
+```
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-distinctUntilChanged.png)
+
+distinctUntilChanged的实现是用bind来完成的。每次变换中都记录一下原信号上一次发送过来的值，并与这一次进行比较，如果是相同的值，就“吞”掉，返回empty信号。只有和原信号上一次发送的值不同，变换后的新信号才把这个值发送出来。
+
+关于distinctUntilChanged，这里关注的是两两信号之间的值是否不同，有时候我们可能需要一个类似于NSSet的信号集，distinctUntilChanged就无法满足了。在ReactiveCocoa 2.5的这个版本也并没有向我们提供distinct的变换函数。
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-distinct.png)
+
+我们可以自己实现类似的变换。实现思路也不难，可以把之前每次发送过来的信号都用数组存起来，新来的信号都去数组里面查找一遍，如果找不到，就把这个值发送出去，如果找到了，就返回empty信号。效果如上图。
+
+### 5. take:
+
+```
+- (instancetype)take:(NSUInteger)count {
+    Class class = self.class;
+ 
+    if (count == 0) return class.empty;
+ 
+    return [[self bind:^{
+        __block NSUInteger taken = 0;
+ 
+        return ^ id (id value, BOOL *stop) {
+            if (taken < count) {
+                ++taken;
+                if (taken == count) *stop = YES;
+                return [class return:value];
+            } else {
+                return nil;
+            }
+        };
+    }] setNameWithFormat:@"[%@] -take: %lu", self.name, (unsigned long)count];
+}
+```
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-take.png)
+
+take:实现也非常简单，借助bind函数来实现的。入参的count是原信号取值的个数。在bind的闭包中，taken计数从0开始取原信号的值，当taken取到count个数的时候，就停止取值。
+
+在take:的基础上我们还可以继续改造出新的变换方式。比如说，想取原信号中执行的第几个值。类似于elementAt的操作。这个操作在ReactiveCocoa 2.5的这个版本也并没有直接向我们提供出来。
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-elementAt.png)
+
+```
+// 我自己增加实现的方法
+- (instancetype)elementAt:(NSUInteger)index {
+    Class class = self.class;
+
+    return [[self bind:^{
+        __block NSUInteger taken = 0;
+
+        return ^ id (id value, BOOL *stop) {
+            if (index == 0) {
+                *stop = YES;
+                return [class return:value];
+            }
+            if (taken == index) {
+                *stop = YES;
+                return [class return:value];
+            } else if (taken < index){
+                taken ++;
+                return [class empty];
+            }else {
+                return nil;
+            }
+        };
+    }] setNameWithFormat:@"[%@] -elementAt: %lu", self.name, (unsigned long)index];
+}
+```
+
+### 6. takeLast:
+
+```
+- (RACSignal *)takeLast:(NSUInteger)count {
+    return [[RACSignal createSignal:^(id subscriber) {
+        NSMutableArray *valuesTaken = [NSMutableArray arrayWithCapacity:count];
+        return [self subscribeNext:^(id x) {
+            [valuesTaken addObject:x ? : RACTupleNil.tupleNil];
+
+            while (valuesTaken.count > count) {
+                [valuesTaken removeObjectAtIndex:0];
+            }
+        } error:^(NSError *error) {
+            [subscriber sendError:error];
+        } completed:^{
+            for (id value in valuesTaken) {
+                [subscriber sendNext:value == RACTupleNil.tupleNil ? nil : value];
+            }
+
+            [subscriber sendCompleted];
+        }];
+    }] setNameWithFormat:@"[%@] -takeLast: %lu", self.name, (unsigned long)count];
+}
+```
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-takeLast.png)
+
+takeLast:的实现也是按照套路来。先创建一个新信号，return的时候订阅原信号。在函数内部用一个valuesTaken来保存原信号发送过来的值，原信号发多少，就存多少，直到个数溢出入参给定的count，就溢出数组第0位。这样能保证数组里面始终都装着最后count个原信号的值。
+
+当原信号发送completed信号的时候，把数组里面存的值都sendNext出去。这里要注意的也是该变换发送信号的时机。如果原信号一直没有completed，那么takeLast:就一直没法发出任何信号来。
+
+### 7. takeUntilBlock:
+
+```
+- (instancetype)takeUntilBlock:(BOOL (^)(id x))predicate {
+    NSCParameterAssert(predicate != nil);
+
+    Class class = self.class;
+
+    return [[self bind:^{
+        return ^ id (id value, BOOL *stop) {
+            if (predicate(value)) return nil;
+
+            return [class return:value];
+        };
+    }] setNameWithFormat:@"[%@] -takeUntilBlock:", self.name];
+}
+```
+
+takeUntilBlock:是根据传入的predicate闭包作为筛选条件的。一旦predicate( )闭包满足条件，那么新信号停止发送新信号，因为它被置为nil了。和函数名的意思是一样的，take原信号的值，Until直到闭包满足条件。
+
+### 8. takeWhileBlock:
+
+```
+- (instancetype)takeWhileBlock:(BOOL (^)(id x))predicate {
+    NSCParameterAssert(predicate != nil);
+
+    return [[self takeUntilBlock:^ BOOL (id x) {
+        return !predicate(x);
+    }] setNameWithFormat:@"[%@] -takeWhileBlock:", self.name];
+}
+```
+
+takeWhileBlock:的信号集是takeUntilBlock:的信号集的补集。全集是原信号。takeWhileBlock:底层还是调用takeUntilBlock:，只不过判断条件的是不满足predicate( )闭包的集合。
+
+### 9. takeUntil:
+
+```
+- (RACSignal *)takeUntil:(RACSignal *)signalTrigger {
+    return [[RACSignal createSignal:^(id subscriber) {
+        RACCompoundDisposable *disposable = [RACCompoundDisposable compoundDisposable];
+        void (^triggerCompletion)(void) = ^{
+            [disposable dispose];
+            [subscriber sendCompleted];
+        };
+
+        RACDisposable *triggerDisposable = [signalTrigger subscribeNext:^(id _) {
+            triggerCompletion();
+        } completed:^{
+            triggerCompletion();
+        }];
+
+        [disposable addDisposable:triggerDisposable];
+
+        if (!disposable.disposed) {
+            RACDisposable *selfDisposable = [self subscribeNext:^(id x) {
+                [subscriber sendNext:x];
+            } error:^(NSError *error) {
+                [subscriber sendError:error];
+            } completed:^{
+                [disposable dispose];
+                [subscriber sendCompleted];
+            }];
+
+            [disposable addDisposable:selfDisposable];
+        }
+
+        return disposable;
+    }] setNameWithFormat:@"[%@] -takeUntil: %@", self.name, signalTrigger];
+}
+```
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-takeUntil.png)
+
+takeUntil:的实现也是“经典套路”——return一个新信号，在新信号中订阅原信号。入参是一个信号signalTrigger，这个信号是一个Trigger。一旦signalTrigger发出第一个信号，就会触发triggerCompletion( )闭包，在这个闭包中，会调用triggerCompletion( )闭包。
+
+一旦调用了triggerCompletion( )闭包，就会把原信号取消订阅，并给变换的新的信号订阅者sendCompleted。
+
+如果入参signalTrigger一直没有sendNext，那么原信号就会一直sendNext:。
+
+### 10. takeUntilReplacement:
+
+```
+- (RACSignal *)takeUntilReplacement:(RACSignal *)replacement {
+    return [RACSignal createSignal:^(id subscriber) {
+        RACSerialDisposable *selfDisposable = [[RACSerialDisposable alloc] init];
+
+        RACDisposable *replacementDisposable = [replacement subscribeNext:^(id x) {
+            [selfDisposable dispose];
+            [subscriber sendNext:x];
+        } error:^(NSError *error) {
+            [selfDisposable dispose];
+            [subscriber sendError:error];
+        } completed:^{
+            [selfDisposable dispose];
+            [subscriber sendCompleted];
+        }];
+
+        if (!selfDisposable.disposed) {
+            selfDisposable.disposable = [[self
+                                          concat:[RACSignal never]]
+                                         subscribe:subscriber];
+        }
+
+        return [RACDisposable disposableWithBlock:^{
+            [selfDisposable dispose];
+            [replacementDisposable dispose];
+        }];
+    }];
+}
+```
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-takeUntilReplacement.png)
+
+1. 原信号concat:了一个[RACSignal never]信号，这样原信号就一直不会disposed，会一直等待replacement信号的到来。
+2. 控制selfDisposable是否被dispose，控制权来自于入参的replacement信号，一旦replacement信号sendNext，那么原信号就会取消订阅，接下来的事情就会交给replacement信号了。
+3. 变换后的新信号sendNext，sendError，sendCompleted全部都由replacement信号来发送，最终新信号完成的时刻也是replacement信号完成的时刻。
+
+### 11. skip:
+
+```
+- (instancetype)skip:(NSUInteger)skipCount {
+    Class class = self.class;
+
+    return [[self bind:^{
+        __block NSUInteger skipped = 0;
+
+        return ^(id value, BOOL *stop) {
+            if (skipped >= skipCount) return [class return:value];
+
+            skipped++;
+            return class.empty;
+        };
+    }] setNameWithFormat:@"[%@] -skip: %lu", self.name, (unsigned long)skipCount];
+}
+```
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-skip.png)
+
+
+skip:信号集和take:信号集是补集关系，全集是原信号。take:是取原信号的前count个信号，而skip:是从原信号第count + 1位开始取信号。
+
+skipped是一个游标，每次原信号发送一个值，就比较它和入参skipCount的大小。如果不比skipCount大，说明还需要跳过，所以就返回empty信号，否则就把原信号的值发送出来。
+
+通过类比take系列方法，可以发现在ReactiveCocoa 2.5的这个版本也并没有向我们提供skipLast:的变换函数。这个变换函数的实现过程也不难，我们可以类比takeLast:来实现。
+
+实现的思路也不难，原信号每次发送过来的值，都用一个数组存储起来。skipLast:是想去掉原信号最末尾的count个信号。
+
+我们先来分析一下：假设原信号有n个信号，从0 – (n-1)，去掉最后的count个，前面还剩n – count个信号。那么从 原信号的第 count + 1位的信号开始发送，到原信号结束，这样中间就正好是发送了 n – count 个信号。
+
+分析清楚后，代码就很容易了：
+
+```
+// 我自己增加实现的方法
+- (RACSignal *)skipLast:(NSUInteger)count {
+    return [[RACSignal createSignal:^(id subscriber) {
+        NSMutableArray *valuesTaken = [NSMutableArray arrayWithCapacity:count];
+        return [self subscribeNext:^(id x) {
+            [valuesTaken addObject:x ? : RACTupleNil.tupleNil];
+
+            while (valuesTaken.count > count) {
+                [subscriber sendNext:valuesTaken[0] == RACTupleNil.tupleNil ? nil : valuesTaken[0]];
+                [valuesTaken removeObjectAtIndex:0];
+            }
+        } error:^(NSError *error) {
+            [subscriber sendError:error];
+        } completed:^{            
+            [subscriber sendCompleted];
+        }];
+    }] setNameWithFormat:@"[%@] -skipLast: %lu", self.name, (unsigned long)count];
+}
+```
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-skipLast.png)
+
+原信号每发送过来一个信号就存入数组，当数组里面的个数大于count的时候，就是需要我们发送信号的时候，这个时候每次都把数组里面第0位发送出去即可，数组维护了一个FIFO的队列。这样就实现了skipLast:的效果了。
+
+### 12. skipUntilBlock:
+
+```
+- (instancetype)skipUntilBlock:(BOOL (^)(id x))predicate {
+    NSCParameterAssert(predicate != nil);
+
+    Class class = self.class;
+
+    return [[self bind:^{
+        __block BOOL skipping = YES;
+
+        return ^ id (id value, BOOL *stop) {
+            if (skipping) {
+                if (predicate(value)) {
+                    skipping = NO;
+                } else {
+                    return class.empty;
+                }
+            }
+
+            return [class return:value];
+        };
+    }] setNameWithFormat:@"[%@] -skipUntilBlock:", self.name];
+}
+```
+
+skipUntilBlock: 的实现可以类比takeUntilBlock: 的实现。
+
+skipUntilBlock: 是根据传入的predicate闭包作为筛选条件的。一旦predicate( )闭包满足条件，那么skipping = NO。skipping为NO，以后原信号发送的每个值都原封不动的发送出去。predicate( )闭包不满足条件的时候，即会一直skip原信号的值。和函数名的意思是一样的，skip原信号的值，Until直到闭包满足条件，就不再skip了。
+
+### 13. skipWhileBlock: 
+
+```
+- (instancetype)skipWhileBlock:(BOOL (^)(id x))predicate {
+    NSCParameterAssert(predicate != nil);
+
+    return [[self skipUntilBlock:^ BOOL (id x) {
+        return !predicate(x);
+    }] setNameWithFormat:@"[%@] -skipWhileBlock:", self.name];
+}
+```
+
+skipWhileBlock:的信号集是skipUntilBlock:的信号集的补集。全集是原信号。skipWhileBlock:底层还是调用skipUntilBlock:，只不过判断条件的是不满足predicate( )闭包的集合。
+
+到这里skip系列方法就结束了，对比take系列的方法，少了2个方法，在ReactiveCocoa 2.5的这个版本中 takeUntil: 和 takeUntilReplacement:这两个方法没有与之对应的skip方法。
+
+```
+// 我自己增加实现的方法
+- (RACSignal *)skipUntil:(RACSignal *)signalTrigger {
+    return [[RACSignal createSignal:^(id subscriber) {
+        RACCompoundDisposable *disposable = [RACCompoundDisposable compoundDisposable];
+
+        __block BOOL sendTrigger = NO;
+
+        void (^triggerCompletion)(void) = ^{
+            sendTrigger = YES;
+        };
+
+        RACDisposable *triggerDisposable = [signalTrigger subscribeNext:^(id _) {
+            triggerCompletion();
+        } completed:^{
+            triggerCompletion();
+        }];
+
+        [disposable addDisposable:triggerDisposable];
+
+        if (!disposable.disposed) {
+            RACDisposable *selfDisposable = [self subscribeNext:^(id x) {
+
+                if (sendTrigger) {
+                    [subscriber sendNext:x];
+                }
+
+            } error:^(NSError *error) {
+                [subscriber sendError:error];
+            } completed:^{
+                [disposable dispose];
+                [subscriber sendCompleted];
+            }];
+
+            [disposable addDisposable:selfDisposable];
+        }
+
+        return disposable;
+    }] setNameWithFormat:@"[%@] -skipUntil: %@", self.name, signalTrigger];
+}
+```
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-skipUntil.png)
+
+skipUntil实现方法也很简单，当入参的signalTrigger开发发送信号的时候，就让原信号sendNext把值发送出来，否则就把原信号的值“吞”掉。
+
+skipUntilReplacement:就没什么意义了，把原信号经过skipUntilReplacement:变换之后得到的新的信号就是Replacement信号。所以说这个操作也就没意义了。
+
+### 14. groupBy:transform:
+
+```
+- (RACSignal *)groupBy:(id (^)(id object))keyBlock transform:(id (^)(id object))transformBlock {
+    NSCParameterAssert(keyBlock != NULL);
+
+    return [[RACSignal createSignal:^(id subscriber) {
+        NSMutableDictionary *groups = [NSMutableDictionary dictionary];
+        NSMutableArray *orderedGroups = [NSMutableArray array];
+
+        return [self subscribeNext:^(id x) {
+            id key = keyBlock(x);
+            RACGroupedSignal *groupSubject = nil;
+            @synchronized(groups) {
+                groupSubject = groups[key];
+                if (groupSubject == nil) {
+                    groupSubject = [RACGroupedSignal signalWithKey:key];
+                    groups[key] = groupSubject;
+                    [orderedGroups addObject:groupSubject];
+                    [subscriber sendNext:groupSubject];
+                }
+            }
+
+            [groupSubject sendNext:transformBlock != NULL ? transformBlock(x) : x];
+        } error:^(NSError *error) {
+            [subscriber sendError:error];
+
+            [orderedGroups makeObjectsPerformSelector:@selector(sendError:) withObject:error];
+        } completed:^{
+            [subscriber sendCompleted];
+
+            [orderedGroups makeObjectsPerformSelector:@selector(sendCompleted)];
+        }];
+    }] setNameWithFormat:@"[%@] -groupBy:transform:", self.name];
+}
+```
+
+看groupBy:transform:的实现，依旧是老“套路”。return 一个新的RACSignal，在新的信号里面订阅原信号。
+
+groupBy:transform:的重点就在subscribeNext中了。
+
+1. 首先解释一下两个入参。两个入参都是闭包，keyBlock返回值是要作为字典的key，transformBlock的返回值是对原信号发出来的值x进行变换。
+2. 先创建一个NSMutableDictionary字典groups，和NSMutableArray数组orderedGroups。
+3. 从字典里面取出key对应的value，这里的key对应着keyBlock返回值。value的值是一个RACGroupedSignal信号。如果找不到对应的key值，就新建一个RACGroupedSignal信号，并存入字典对应的key值，与之对应。
+4. 新变换之后的信号，订阅之后，RACGroupedSignal进行sendNext，这是一个信号，如果transformBlock不为空，就发送transformBlock变换之后的值。
+5. sendError和sendCompleted都要分别对数组orderedGroups里面每个RACGroupedSignal都要进行sendError或者sendCompleted。因为要对数组里面每个信号都执行一个操作，所以需要调用makeObjectsPerformSelector:withObject:方法。
+
+经过groupBy:transform:变换之后，原信号会根据keyBlock进行分组。
+
+写出测试代码，来看看平时应该怎么用。
+
+```
+    RACSignal *signalA = [RACSignal createSignal:^RACDisposable *(id subscriber)
+                         {
+                             [subscriber sendNext:@1];
+                             [subscriber sendNext:@2];
+                             [subscriber sendNext:@3];
+                             [subscriber sendNext:@4];
+                             [subscriber sendNext:@5];
+                             [subscriber sendCompleted];
+                             return [RACDisposable disposableWithBlock:^{
+                                 NSLog(@"signal dispose");
+                             }];
+                         }];
+
+    RACSignal *signalGroup = [signalA groupBy:^id(NSNumber *object) {
+        return object.integerValue > 3 ? @"good" : @"bad";
+    } transform:^id(NSNumber * object) {
+        return @(object.integerValue * 10);
+    }];
+
+    [[[signalGroup filter:^BOOL(RACGroupedSignal *value) {
+        return [(NSString *)value.key isEqualToString:@"good"];
+    }] flatten]subscribeNext:^(id x) {
+        NSLog(@"subscribeNext: %@", x);
+    }];
+```
+
+假设原信号发送的1，2，3，4，5是代表的成绩的5个等级。当成绩大于3的都算“good”，小于3的都算“bad”。
+
+signalGroup是原信号signalA经过groupBy:transform:得到的新的信号，这个信号是一个高阶的信号，因为它里面并不是直接装的是值，signalGroup这个信号里面装的还是信号。signalGroup里面有两个分组，分别是“good”分组和“bad”分组。
+
+想从中取出这两个分组里面的值，需要进行一次filter:筛选。筛选之后得到对应分组的高阶信号。这时还要再进行一个flatten操作，把高阶信号变成低阶信号，再次订阅才能取到其中的值。
+
+订阅新信号的值，输出如下：
+
+```
+subscribeNext: 40
+subscribeNext: 50
+```
+
+### 15. groupBy:
+
+```
+- (RACSignal *)groupBy:(id (^)(id object))keyBlock {
+    return [[self groupBy:keyBlock transform:nil] setNameWithFormat:@"[%@] -groupBy:", self.name];
+}
+```
+
+groupBy:操作就是groupBy:transform:的缩减版，transform传入的为nil。
+
+关于groupBy:可以干的事情很多，可以进行很高级的分组操作。这里可以举一个例子：
+
+```
+// 简单算法题，分离数组中的相同的元素，如果元素个数大于2，则组成一个新的数组，结果得到多个包含相同元素的数组，
+    // 例如[1,2,3,1,2,3]分离成[1,1],[2,2],[3,3]
+    RACSignal *signal = @[@1, @2, @3, @4,@2,@3,@3,@4,@4,@4].rac_sequence.signal;
+ 
+      NSArray * array = [[[[signal groupBy:^NSString *(NSNumber *object) {
+          return [NSString stringWithFormat:@"%@",object];
+      }] map:^id(RACGroupedSignal *value) {
+          return [value sequence];
+      }] sequence] map:^id(RACSignalSequence * value) {
+          return value.array;
+      }].array;
+ 
+    for (NSNumber * num in array) {
+        NSLog(@"最后的数组%@",num);
+    }
+ 
+   // 最后输出 [1,2,3,4,2,3,3,4,4,4]变成[1],[2,2],[3,3,3],[4,4,4,4]
+```
 
 ## 组合操作
 
@@ -2063,6 +2627,8 @@ leeway这个参数是为dispatch source指定一个期望的定时器事件精�
 ## 多线程操作
 
 ## 其他操作
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-map.png)
 
 
 
