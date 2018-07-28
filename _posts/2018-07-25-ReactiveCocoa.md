@@ -3779,16 +3779,361 @@ timeout: onScheduler:的实现很简单，它比正常的信号订阅多了一�
 
 ## 同步操作
 
+在ReactiveCocoa中还包含一些同步的操作，这些操作一般我们很少使用，除非真的很确定这样做了之后不会有什么问题，否则胡乱使用会导致线程死锁等一些严重的问题。
+
+```
+- (id)firstOrDefault:(id)defaultValue success:(BOOL *)success error:(NSError **)error {
+    NSCondition *condition = [[NSCondition alloc] init];
+    condition.name = [NSString stringWithFormat:@"[%@] -firstOrDefault: %@ success:error:", self.name, defaultValue];
+
+    __block id value = defaultValue;
+    __block BOOL done = NO;
+
+    // Ensures that we don't pass values across thread boundaries by reference.
+    __block NSError *localError;
+    __block BOOL localSuccess;
+
+    [[self take:1] subscribeNext:^(id x) {
+        // 加锁
+        [condition lock];
+
+        value = x;
+        localSuccess = YES;
+
+        done = YES;
+        [condition broadcast];
+        // 解锁
+        [condition unlock];
+    } error:^(NSError *e) {
+        // 加锁
+        [condition lock];
+
+        if (!done) {
+            localSuccess = NO;
+            localError = e;
+
+            done = YES;
+            [condition broadcast];
+        }
+        // 解锁
+        [condition unlock];
+    } completed:^{
+        // 加锁
+        [condition lock];
+
+        localSuccess = YES;
+
+        done = YES;
+        [condition broadcast];
+        // 解锁
+        [condition unlock];
+    }];
+    // 加锁
+    [condition lock];
+    while (!done) {
+        [condition wait];
+    }
+
+    if (success != NULL) *success = localSuccess;
+    if (error != NULL) *error = localError;
+    // 解锁
+    [condition unlock];
+    return value;
+}
+```
+
+从源码上看，firstOrDefault: success: error:这种同步的方法很容易导致线程死锁。它在subscribeNext，error，completed的闭包里面都调用condition锁先lock再unlock。如果一个信号发送值过来，都没有执行subscribeNext，error，completed这3个操作里面的任意一个，那么就会执行[condition wait]，等待。
+
+由于对原信号进行了take:1操作，所以只会对第一个值进行操作。执行完subscribeNext，error，completed这3个操作里面的任意一个，又会加一次锁，对外部传进来的入参success和error进行赋值，已便外部可以拿到里面的状态。最终返回信号是原信号中第一个next里面的值，如果原信号第一个值没有，比如直接error或者completed，那么返回的是defaultValue。
+
+done为YES表示已经成功执行了subscribeNext，error，completed这3个操作里面的任意一个。反之为NO。
+
+localSuccess为YES表示成功发送值或者成功发送完了原信号的所有值，期间没有发生错误。
+
+condition的broadcast操作是唤醒其他线程的操作，相当于操作系统里面互斥信号量的signal操作。
+
+入参defaultValue是给内部变量value的一个初始值。当原信号发送出一个值之后，value的值时刻都会与原信号的值保持一致。
+
+success和error是外部变量的地址，从外面可以监听到里面的状态。在函数内部赋值，在函数外面拿到它们的值。
+
+### 2. firstOrDefault:
+
+```
+- (id)firstOrDefault:(id)defaultValue {
+    return [self firstOrDefault:defaultValue success:NULL error:NULL];
+}
+```
+
+firstOrDefault:的实现就是调用了firstOrDefault: success: error:方法。只不过不需要传success和error，不关心内部的状态。最终返回信号是原信号中第一个next里面的值，如果原信号第一个值没有，比如直接error或者completed，那么返回的是defaultValue。
+
+### 3. first
+
+```
+- (id)first {
+    return [self firstOrDefault:nil];
+}
+```
+
+first方法就更加省略，连defaultValue也不传。最终返回信号是原信号中第一个next里面的值，如果原信号第一个值没有，比如直接error或者completed，那么返回的是nil。
+
+### 4. waitUntilCompleted:
+
+```
+- (BOOL)waitUntilCompleted:(NSError **)error {
+    BOOL success = NO;
+
+    [[[self
+       ignoreValues]
+      setNameWithFormat:@"[%@] -waitUntilCompleted:", self.name]
+     firstOrDefault:nil success:&success error:error];
+
+    return success;
+}
+```
+
+waitUntilCompleted:里面还是调用firstOrDefault: success: error:方法。返回值是success。只要原信号正常的发送完信号，success应该为YES，但是如果发送过程中出现了error，success就为NO。success作为返回值，外部就可以监听到是否发送成功。
+
+虽然这个方法可以监听到发送结束的状态，但是也尽量不要使用，因为它的实现调用了firstOrDefault: success: error:方法，这个方法里面有大量的锁的操作，一不留神就会导致死锁。
+
+### 5. toArray
+
+```
+- (NSArray *)toArray {
+    return [[[self collect] first] copy];
+}
+```
+
+经过collect之后，原信号所有的值都会被加到一个数组里面，取出信号的第一个值就是一个数组。所以执行完first之后第一个值就是原信号所有值的数组。
+
 ## 副作用操作
+
+### 1. doNext:
+
+```
+- (RACSignal *)doNext:(void (^)(id x))block {
+    NSCParameterAssert(block != NULL);
+
+    return [[RACSignal createSignal:^(id subscriber) {
+        return [self subscribeNext:^(id x) {
+            block(x);
+            [subscriber sendNext:x];
+        } error:^(NSError *error) {
+            [subscriber sendError:error];
+        } completed:^{
+            [subscriber sendCompleted];
+        }];
+    }] setNameWithFormat:@"[%@] -doNext:", self.name];
+}
+```
+
+doNext:能让我们在原信号sendNext之前，能执行一个block闭包，在这个闭包中我们可以执行我们想要执行的副作用操作。
+
+### 2. doError:
+
+```
+- (RACSignal *)doError:(void (^)(NSError *error))block {
+    NSCParameterAssert(block != NULL);
+
+    return [[RACSignal createSignal:^(id subscriber) {
+        return [self subscribeNext:^(id x) {
+            [subscriber sendNext:x];
+        } error:^(NSError *error) {
+            block(error);
+            [subscriber sendError:error];
+        } completed:^{
+            [subscriber sendCompleted];
+        }];
+    }] setNameWithFormat:@"[%@] -doError:", self.name];
+}
+```
+
+doError:能让我们在原信号sendError之前，能执行一个block闭包，在这个闭包中我们可以执行我们想要执行的副作用操作。
+
+### 3. doCompleted:
+
+```
+- (RACSignal *)doCompleted:(void (^)(void))block {
+    NSCParameterAssert(block != NULL);
+
+    return [[RACSignal createSignal:^(id subscriber) {
+        return [self subscribeNext:^(id x) {
+            [subscriber sendNext:x];
+        } error:^(NSError *error) {
+            [subscriber sendError:error];
+        } completed:^{
+            block();
+            [subscriber sendCompleted];
+        }];
+    }] setNameWithFormat:@"[%@] -doCompleted:", self.name];
+}
+```
+
+doCompleted:能让我们在原信号sendCompleted之前，能执行一个block闭包，在这个闭包中我们可以执行我们想要执行的副作用操作。
+
+### 4. initially:
+
+```
+- (RACSignal *)initially:(void (^)(void))block {
+    NSCParameterAssert(block != NULL);
+
+    return [[RACSignal defer:^{
+        block();
+        return self;
+    }] setNameWithFormat:@"[%@] -initially:", self.name];
+}
+```
+
+initially:能让我们在原信号发送之前，先调用了defer:操作，在return self之前先执行了一个闭包，在这个闭包中我们可以执行我们想要执行的副作用操作。
+
+### 5. finally:
+
+```
+- (RACSignal *)finally:(void (^)(void))block {
+    NSCParameterAssert(block != NULL);
+
+    return [[[self
+              doError:^(NSError *error) {
+                  block();
+              }]
+             doCompleted:^{
+                 block();
+             }]
+            setNameWithFormat:@"[%@] -finally:", self.name];
+}
+```
+
+finally:操作调用了doError:和doCompleted:操作，依次在sendError之前，sendCompleted之前，插入一个block( )闭包。这样当信号因为错误而要终止取消订阅，或者，发送结束之前，都能执行一段我们想要执行的副作用操作。
 
 ## 多线程操作
 
-## 其他操作
+在RACSignal里面有3个关于多线程的操作。
 
-![](https://wtj900.github.io/img/RAC/RAC-stream-map.png)
+### 1. deliverOn:
 
+```
+- (RACSignal *)deliverOn:(RACScheduler *)scheduler {
+    return [[RACSignal createSignal:^(id subscriber) {
+        return [self subscribeNext:^(id x) {
+            [scheduler schedule:^{
+                [subscriber sendNext:x];
+            }];
+        } error:^(NSError *error) {
+            [scheduler schedule:^{
+                [subscriber sendError:error];
+            }];
+        } completed:^{
+            [scheduler schedule:^{
+                [subscriber sendCompleted];
+            }];
+        }];
+    }] setNameWithFormat:@"[%@] -deliverOn: %@", self.name, scheduler];
+}
+```
 
+deliverOn:的入参是一个scheduler，当原信号subscribeNext，sendError，sendCompleted的时候，都去调用scheduler的schedule方法。
 
+```
+- (RACDisposable *)schedule:(void (^)(void))block {
+    NSCParameterAssert(block != NULL);
+
+    if (RACScheduler.currentScheduler == nil) return [self.backgroundScheduler schedule:block];
+
+    block();
+    return nil;
+}
+```
+
+在schedule的方法里面会判断当前currentScheduler是否为nil，如果是nil就调用backgroundScheduler去执行block( )闭包,如果不为nil，当前currentScheduler直接执行block( )闭包。
+
+```
++ (instancetype)currentScheduler {
+    RACScheduler *scheduler = NSThread.currentThread.threadDictionary[RACSchedulerCurrentSchedulerKey];
+    if (scheduler != nil) return scheduler;
+    if ([self.class isOnMainThread]) return RACScheduler.mainThreadScheduler;
+
+    return nil;
+}
+```
+
+判断currentScheduler是否存在，看两点，一是当前线程的字典里面，是否存在RACSchedulerCurrentSchedulerKey( @”RACSchedulerCurrentSchedulerKey” )，如果存在对应的value，返回scheduler，二是看当前的类是不是在主线程，如果在主线程，返回mainThreadScheduler。如果两个条件都不存在，那么当前currentScheduler就不存在，返回nil。
+
+deliverOn:操作的特点是原信号发送sendNext，sendError，sendCompleted所在线程是确定的。
+
+### 2. subscribeOn:
+
+```
+- (RACSignal *)subscribeOn:(RACScheduler *)scheduler {
+    return [[RACSignal createSignal:^(id subscriber) {
+        RACCompoundDisposable *disposable = [RACCompoundDisposable compoundDisposable];
+
+        RACDisposable *schedulingDisposable = [scheduler schedule:^{
+            RACDisposable *subscriptionDisposable = [self subscribe:subscriber];
+
+            [disposable addDisposable:subscriptionDisposable];
+        }];
+
+        [disposable addDisposable:schedulingDisposable];
+        return disposable;
+    }] setNameWithFormat:@"[%@] -subscribeOn: %@", self.name, scheduler];
+}
+```
+
+subscribeOn:操作就是在传入的scheduler的闭包内部订阅原信号的。它与deliverOn:操作就不同：
+
+subscribeOn:操作能够保证didSubscribe block( )闭包在入参scheduler中执行，但是不能保证原信号subscribeNext，sendError，sendCompleted在哪个scheduler中执行。
+
+deliverOn:与subscribeOn:正好反过来，能保证原信号subscribeNext，sendError，sendCompleted在哪个scheduler中执行，但是不能保证didSubscribe block( )闭包在哪个scheduler中执行。
+
+### 3. deliverOnMainThread
+
+```
+- (RACSignal *)deliverOnMainThread {
+    return [[RACSignal createSignal:^(id subscriber) {
+        __block volatile int32_t queueLength = 0;
+
+        void (^performOnMainThread)(dispatch_block_t) = ^(dispatch_block_t block) { // 暂时省略};
+
+        return [self subscribeNext:^(id x) {
+            performOnMainThread(^{
+                [subscriber sendNext:x];
+            });
+        } error:^(NSError *error) {
+            performOnMainThread(^{
+                [subscriber sendError:error];
+            });
+        } completed:^{
+            performOnMainThread(^{
+                [subscriber sendCompleted];
+            });
+        }];
+    }] setNameWithFormat:@"[%@] -deliverOnMainThread", self.name];
+}
+```
+
+对比deliverOn:的源码实现，发现两者比较相似，只不过这里deliverOnMainThread把sendNext，sendError，sendCompleted都包在了performOnMainThread闭包中执行。
+
+```
+        __block volatile int32_t queueLength = 0;
+
+        void (^performOnMainThread)(dispatch_block_t) = ^(dispatch_block_t block) {
+            int32_t queued = OSAtomicIncrement32(&queueLength);
+            if (NSThread.isMainThread && queued == 1) {
+                block();
+                OSAtomicDecrement32(&queueLength);
+            } else {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    block();
+                    OSAtomicDecrement32(&queueLength);
+                });
+            }
+        };
+```
+
+performOnMainThread闭包内部保证了入参block( )闭包一定是在主线程中执行。
+
+OSAtomicIncrement32 和 OSAtomicDecrement32是原子操作，分别代表+1和-1。下面的if-else判断里面，不管是满足哪一条，最终都还是在主线程中执行block( )闭包。
+
+deliverOnMainThread能保证原信号subscribeNext，sendError，sendCompleted都在主线程MainThread中执行。
 
 
 
