@@ -3145,6 +3145,638 @@ samplerDisposable.disposable = [sampler subscribeNext:^(id _) {
 
 ## 高阶信号操作
 
+### 1. flattenMap:
+
+flattenMap:在整个RAC中具有很重要的地位，很多信号变换都是可以用flattenMap:来实现的。
+
+map:，flatten，filter，sequenceMany:这4个操作都是用flattenMap:来实现的。然而其他变换操作实现里面用到map:，flatten，filter又有很多。
+
+回顾一下map:的实现：
+
+```
+- (instancetype)map:(id (^)(id value))block {
+    NSCParameterAssert(block != nil);
+
+    Class class = self.class;
+    return [[self flattenMap:^(id value) {
+        return [class return:block(value)];
+    }] setNameWithFormat:@"[%@] -map:", self.name];
+}
+```
+
+map:的操作其实就是直接原信号进行的 flattenMap:的操作，变换出来的新的信号的值是block(value)。
+
+flatten的实现接下去会具体分析，这里先略过。
+
+filter的实现：
+
+```
+- (instancetype)filter:(BOOL (^)(id value))block {
+    NSCParameterAssert(block != nil);
+
+    Class class = self.class;
+    return [[self flattenMap:^ id (id value) {
+        block(value) ? return [class return:value] :  return class.empty;
+    }] setNameWithFormat:@"[%@] -filter:", self.name];
+}
+```
+
+filter的实现和map:有点类似，也是对原信号进行 flattenMap:的操作，只不过block(value)不是作为返回值，而是作为判断条件，满足这个闭包的条件，变换出来的新的信号返回值就是value，不满足的就返回empty信号。
+
+接下去要分析的高阶操作里面，switchToLatest，try:，tryMap:的实现中也将会使用到flattenMap:。
+
+flattenMap:的源码实现：
+
+```
+- (instancetype)flattenMap:(RACStream * (^)(id value))block {
+    Class class = self.class;
+ 
+    return [[self bind:^{
+        return ^(id value, BOOL *stop) {
+            id stream = block(value) ?: [class empty];
+            NSCAssert([stream isKindOfClass:RACStream.class], @"Value returned from -flattenMap: is not a stream: %@", stream);
+ 
+            return stream;
+        };
+    }] setNameWithFormat:@"[%@] -flattenMap:", self.name];
+}
+```
+
+flattenMap:的实现是调用了bind函数，对原信号进行变换，并返回block(value)的新信号。
+
+从flattenMap:的源码可以看到，它是可以支持类似Promise的串行异步操作的，并且flattenMap:是满足Monad中bind部分定义的。flattenMap:没法去实现takeUntil:和take:的操作。
+
+然而，bind操作可以实现take:的操作，bind是完全满足Monad中bind部分定义的。
+
+### 2. flatten
+
+flatten的源码实现：
+
+```
+- (instancetype)flatten {
+    __weak RACStream *stream __attribute__((unused)) = self;
+    return [[self flattenMap:^(id value) {
+        return value;
+    }] setNameWithFormat:@"[%@] -flatten", self.name];
+}
+```
+
+flatten操作必须是对高阶信号进行操作，如果信号里面不是信号，即不是高阶信号，那么就会崩溃。崩溃信息如下：
+
+`*** Terminating app due to uncaught exception 'NSInternalInconsistencyException', reason: 'Value returned from -flattenMap: is not a stream`
+
+所以flatten是对高阶信号进行的降阶操作。高阶信号每发送一次信号，经过flatten变换，由于flattenMap:操作之后，返回的新的信号的每个值就是原信号中每个信号的值。
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-flatten.png)
+
+如果对信号A，信号B，信号C进行merge:操作，可以达到和flatten一样的效果。
+
+`[RACSignal merge:@[signalA,signalB,signalC]];`
+
+```
++ (RACSignal *)merge:(id)signals {
+    NSMutableArray *copiedSignals = [[NSMutableArray alloc] init];
+    for (RACSignal *signal in signals) {
+        [copiedSignals addObject:signal];
+    }
+ 
+    return [[[RACSignal
+              createSignal:^ RACDisposable * (id subscriber) {
+                  for (RACSignal *signal in copiedSignals) {
+                      [subscriber sendNext:signal];
+                  }
+ 
+                  [subscriber sendCompleted];
+                  return nil;
+              }]
+             flatten]
+            setNameWithFormat:@"+merge: %@", copiedSignals];
+}
+```
+
+现在在回来看这段代码，copiedSignals虽然是一个NSMutableArray，但是它近似合成了一个上图中的高阶信号。然后这些信号们每发送出来一个信号就发给订阅者。整个操作如flatten的字面意思一样，压平。
+
+### 3. flatten:
+
+flatten:操作也必须是对高阶信号进行操作，如果信号里面不是信号，即不是高阶信号，那么就会崩溃。
+
+flatten:的实现比较复杂，一步步的来分析：
+
+```
+- (RACSignal *)flatten:(NSUInteger)maxConcurrent {
+	return [[RACSignal createSignal:^(id<RACSubscriber> subscriber) {
+		RACCompoundDisposable *compoundDisposable = [[RACCompoundDisposable alloc] init];
+
+		// Contains disposables for the currently active subscriptions.
+		//
+		// This should only be used while synchronized on `subscriber`.
+		NSMutableArray *activeDisposables = [[NSMutableArray alloc] initWithCapacity:maxConcurrent];
+
+		// Whether the signal-of-signals has completed yet.
+		//
+		// This should only be used while synchronized on `subscriber`.
+		__block BOOL selfCompleted = NO;
+
+		// Subscribes to the given signal.
+		__block void (^subscribeToSignal)(RACSignal *);
+
+		// Weak reference to the above, to avoid a leak.
+		__weak __block void (^recur)(RACSignal *);
+
+		// Sends completed to the subscriber if all signals are finished.
+		//
+		// This should only be used while synchronized on `subscriber`.
+		void (^completeIfAllowed)(void) = ^{
+			if (selfCompleted && activeDisposables.count == 0) {
+				[subscriber sendCompleted];
+
+				// A strong reference is held to `subscribeToSignal` until completion,
+				// preventing it from deallocating early.
+				subscribeToSignal = nil;
+			}
+		};
+
+		// The signals waiting to be started.
+		//
+		// This array should only be used while synchronized on `subscriber`.
+		NSMutableArray *queuedSignals = [NSMutableArray array];
+
+		recur = subscribeToSignal = ^(RACSignal *signal) {
+			RACSerialDisposable *serialDisposable = [[RACSerialDisposable alloc] init];
+
+			@synchronized (subscriber) {
+				[compoundDisposable addDisposable:serialDisposable];
+				[activeDisposables addObject:serialDisposable];
+			}
+
+			serialDisposable.disposable = [signal subscribeNext:^(id x) {
+				[subscriber sendNext:x];
+			} error:^(NSError *error) {
+				[subscriber sendError:error];
+			} completed:^{
+				__strong void (^subscribeToSignal)(RACSignal *) = recur;
+				RACSignal *nextSignal;
+
+				@synchronized (subscriber) {
+					[compoundDisposable removeDisposable:serialDisposable];
+					[activeDisposables removeObjectIdenticalTo:serialDisposable];
+
+					if (queuedSignals.count == 0) {
+						completeIfAllowed();
+						return;
+					}
+
+					nextSignal = queuedSignals[0];
+					[queuedSignals removeObjectAtIndex:0];
+				}
+
+				subscribeToSignal(nextSignal);
+			}];
+		};
+
+		[compoundDisposable addDisposable:[self subscribeNext:^(RACSignal *signal) {
+			if (signal == nil) return;
+
+			NSCAssert([signal isKindOfClass:RACSignal.class], @"Expected a RACSignal, got %@", signal);
+
+			@synchronized (subscriber) {
+				if (maxConcurrent > 0 && activeDisposables.count >= maxConcurrent) {
+					[queuedSignals addObject:signal];
+
+					// If we need to wait, skip subscribing to this
+					// signal.
+					return;
+				}
+			}
+
+			subscribeToSignal(signal);
+		} error:^(NSError *error) {
+			[subscriber sendError:error];
+		} completed:^{
+			@synchronized (subscriber) {
+				selfCompleted = YES;
+				completeIfAllowed();
+			}
+		}]];
+
+		return compoundDisposable;
+	}] setNameWithFormat:@"[%@] -flatten: %lu", self.name, (unsigned long)maxConcurrent];
+}
+```
+
+先来解释一些变量，数组的作用
+
+activeDisposables里面装的是当前正在订阅的订阅者们的disposables信号。
+
+queuedSignals里面装的是被暂时缓存起来的信号，它们等待被订阅。
+
+selfCompleted表示高阶信号是否Completed。
+
+subscribeToSignal闭包的作用是订阅所给的信号。这个闭包的入参参数就是一个信号，在闭包内部订阅这个信号，并进行一些操作。
+
+recur是对subscribeToSignal闭包的一个弱引用，防止strong-weak循环引用，在下面会分析subscribeToSignal闭包，就会明白为什么recur要用weak修饰了。
+
+completeIfAllowed的作用是在所有信号都发送完毕的时候，通知订阅者，给订阅者发送completed。
+
+入参maxConcurrent的意思是最大可容纳同时被订阅的信号个数。
+
+再来详细分析一下具体订阅的过程。
+
+flatten:的内部，订阅高阶信号发出来的信号，这部分的代码比较简单：
+
+```
+    [self subscribeNext:^(RACSignal *signal) {
+        if (signal == nil) return;
+
+        NSCAssert([signal isKindOfClass:RACSignal.class], @"Expected a RACSignal, got %@", signal);
+
+        @synchronized (subscriber) {
+            // 1
+            if (maxConcurrent > 0 && activeDisposables.count >= maxConcurrent) {
+                [queuedSignals addObject:signal];
+                return;
+            }
+        }
+        // 2
+        subscribeToSignal(signal);
+    } error:^(NSError *error) {
+        [subscriber sendError:error];
+    } completed:^{
+        @synchronized (subscriber) {
+            selfCompleted = YES;
+            // 3
+            completeIfAllowed();
+        }
+    }]];
+```
+
+1. 如果当前最大可容纳信号的个数 > 0 ，且，activeDisposables数组里面已经装满到最大可容纳信号的个数，不能再装新的信号了。那么就把当前的信号缓存到queuedSignals数组中。
+2. 直到activeDisposables数组里面有空的位子可以加入新的信号，那么就调用subscribeToSignal( )闭包，开始订阅这个新的信号。
+3. 最后完成的时候标记变量selfCompleted为YES，并且调用completeIfAllowed( )闭包。
+
+```
+void (^completeIfAllowed)(void) = ^{
+    if (selfCompleted && activeDisposables.count == 0) {
+        [subscriber sendCompleted];
+        subscribeToSignal = nil;
+    }
+};
+```
+
+当selfCompleted = YES 并且activeDisposables数组里面的信号都发送完毕，没有可以发送的信号了，即activeDisposables.count = 0，那么就给订阅者sendCompleted。这里值得一提的是，还需要把subscribeToSignal手动置为nil。因为在subscribeToSignal闭包中强引用了completeIfAllowed闭包，防止completeIfAllowed闭包被提早的销毁掉了。所以在completeIfAllowed闭包执行完毕的时候，需要再把subscribeToSignal闭包置为nil。
+
+那么接下来需要看的重点就是subscribeToSignal( )闭包。
+
+```
+    recur = subscribeToSignal = ^(RACSignal *signal) {
+        RACSerialDisposable *serialDisposable = [[RACSerialDisposable alloc] init];
+        // 1
+        @synchronized (subscriber) {
+            [compoundDisposable addDisposable:serialDisposable];
+            [activeDisposables addObject:serialDisposable];
+        }
+
+        serialDisposable.disposable = [signal subscribeNext:^(id x) {
+            [subscriber sendNext:x];
+        } error:^(NSError *error) {
+            [subscriber sendError:error];
+        } completed:^{
+            // 2
+            __strong void (^subscribeToSignal)(RACSignal *) = recur;
+            RACSignal *nextSignal;
+            // 3
+            @synchronized (subscriber) {
+                [compoundDisposable removeDisposable:serialDisposable];
+                [activeDisposables removeObjectIdenticalTo:serialDisposable];
+                // 4
+                if (queuedSignals.count == 0) {
+                    completeIfAllowed();
+                    return;
+                }
+                // 5
+                nextSignal = queuedSignals[0];
+                [queuedSignals removeObjectAtIndex:0];
+            }
+            // 6
+            subscribeToSignal(nextSignal);
+        }];
+    };
+```
+
+1. activeDisposables先添加当前高阶信号发出来的信号的Disposable( 也就是入参信号的Disposable)
+2. 这里会对recur进行__strong，因为下面第6步会用到subscribeToSignal( )闭包，同样也是为了防止出现循环引用。
+3. 订阅入参信号，给订阅者发送信号。当发送完毕后，activeDisposables中移除它对应的Disposable。
+4. 如果当前缓存的queuedSignals数组里面没有缓存的信号，那么就调用completeIfAllowed( )闭包。
+5. 如果当前缓存的queuedSignals数组里面有缓存的信号，那么就取出第0个信号，并在queuedSignals数组移除它。
+6. 把第4步取出的信号继续订阅，继续调用subscribeToSignal( )闭包。
+
+总结一下：高阶信号每发送一个信号值，判断activeDisposables数组装的个数是否已经超过了maxConcurrent。如果装不下了就缓存进queuedSignals数组中。如果还可以装的下就开始调用subscribeToSignal( )闭包，订阅当前信号。
+
+每发送完一个信号就判断缓存数组queuedSignals的个数，如果缓存数组里面已经没有信号了，那么就结束原来高阶信号的发送。如果缓存数组里面还有信号就继续订阅。如此循环，直到原高阶信号所有的信号都发送完毕。
+
+整个flatten:的执行流程都分析清楚了，最后，关于入参maxConcurrent进行更进一步的解读。
+
+回看上面flatten:的实现中有这样一句话:
+
+`if (maxConcurrent > 0 && activeDisposables.count >= maxConcurrent)`
+
+那么maxConcurrent的值域就是最终决定flatten:表现行为。
+
+如果maxConcurrent
+
+`NSMutableArray *activeDisposables = [[NSMutableArray alloc] initWithCapacity:maxConcurrent];`
+
+activeDisposables在初始化的时候会初始化一个大小为maxConcurrent的NSMutableArray。如果maxConcurrent
+
+如果maxConcurrent = 0，会发生什么？那么flatten:就退化成flatten了。
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-flatten_0.png)
+
+如果maxConcurrent = 1，会发生什么？那么flatten:就退化成concat了。
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-flatten_1.png)
+
+如果maxConcurrent > 1，会发生什么？由于至今还没有遇到能用到maxConcurrent > 1的需求情况，所以这里暂时不展示图解了。maxConcurrent > 1之后，flatten的行为还依照高阶信号的个数和maxConcurrent的关系。如果高阶信号的个数maxConcurrent的值，那么多的信号就会进入queuedSignals缓存数组。
+
+### 4. concat
+
+这里的concat实现是在RACSignal里面定义的。
+
+```
+- (RACSignal *)concat {
+    return [[self flatten:1] setNameWithFormat:@"[%@] -concat", self.name];
+}
+```
+
+一看源码就知道了，concat其实就是flatten:1。
+
+当然在RACSignal中定义了concat:方法，这个方法在之前的文章已经分析过了，这里回顾对比一下：
+
+```
+- (RACSignal *)concat:(RACSignal *)signal {
+    return [[RACSignal createSignal:^(id subscriber) {
+        RACSerialDisposable *serialDisposable = [[RACSerialDisposable alloc] init];
+
+        RACDisposable *sourceDisposable = [self subscribeNext:^(id x) {
+            [subscriber sendNext:x];
+        } error:^(NSError *error) {
+            [subscriber sendError:error];
+        } completed:^{
+            RACDisposable *concattedDisposable = [signal subscribe:subscriber];
+            serialDisposable.disposable = concattedDisposable;
+        }];
+
+        serialDisposable.disposable = sourceDisposable;
+        return serialDisposable;
+    }] setNameWithFormat:@"[%@] -concat: %@", self.name, signal];
+}
+```
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-concat.png)
+
+经过对比可以发现，虽然最终变换出来的结果类似，但是针对的信号的对象是不同的，concat是针对高阶信号进行降阶操作。concat:是把两个信号连接起来的操作。如果把高阶信号按照时间轴，从左往右，依次把每个信号都concat:连接起来，那么结果就是concat。
+
+### 5. switchToLatest
+
+```
+- (RACSignal *)switchToLatest {
+    return [[RACSignal createSignal:^(id subscriber) {
+        RACMulticastConnection *connection = [self publish];
+
+        RACDisposable *subscriptionDisposable = [[connection.signal
+                                                  flattenMap:^(RACSignal *x) {
+                                                      NSCAssert(x == nil || [x isKindOfClass:RACSignal.class], @"-switchToLatest requires that the source signal (%@) send signals. Instead we got: %@", self, x);
+                                                      return [x takeUntil:[connection.signal concat:[RACSignal never]]];
+                                                  }]
+                                                 subscribe:subscriber];
+
+        RACDisposable *connectionDisposable = [connection connect];
+        return [RACDisposable disposableWithBlock:^{
+            [subscriptionDisposable dispose];
+            [connectionDisposable dispose];
+        }];
+    }] setNameWithFormat:@"[%@] -switchToLatest", self.name];
+}
+```
+
+switchToLatest这个操作只能用在高阶信号上，如果原信号里面有不是信号的值，那么就会崩溃，崩溃信息如下：
+
+`***** Terminating app due to uncaught exception 'NSInternalInconsistencyException', reason: '-switchToLatest requires that the source signal ( name: ) send signals.`
+
+在switchToLatest操作中，先把原信号转换成热信号，connection.signal就是RACSubject类型的。对RACSubject进行flattenMap:变换。在flattenMap:变换中，connection.signal会先concat:一个never信号。这里concat:一个never信号的原因是为了内部的信号过早的结束而导致订阅者收到complete信号。
+
+flattenMap:变换中x也是一个信号，对x进行takeUntil:变换，效果就是下一个信号到来之前，x会一直发送信号，一旦下一个信号到来，x就会被取消订阅，开始订阅新的信号。
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-switchToLatest.png)
+
+一个高阶信号经过switchToLatest降阶操作之后，能得到上图中的信号。
+
+### 6. switch: cases: default:
+
+switch: cases: default:源码实现如下:
+
+```
++ (RACSignal *)switch:(RACSignal *)signal cases:(NSDictionary *)cases default:(RACSignal *)defaultSignal {
+    NSCParameterAssert(signal != nil);
+    NSCParameterAssert(cases != nil);
+
+    for (id key in cases) {
+        id value __attribute__((unused)) = cases[key];
+        NSCAssert([value isKindOfClass:RACSignal.class], @"Expected all cases to be RACSignals, %@ isn't", value);
+    }
+
+    NSDictionary *copy = [cases copy];
+
+    return [[[signal
+              map:^(id key) {
+                  if (key == nil) key = RACTupleNil.tupleNil;
+
+                  RACSignal *signal = copy[key] ?: defaultSignal;
+                  if (signal == nil) {
+                      NSString *description = [NSString stringWithFormat:NSLocalizedString(@"No matching signal found for value %@", @""), key];
+                      return [RACSignal error:[NSError errorWithDomain:RACSignalErrorDomain code:RACSignalErrorNoMatchingCase userInfo:@{ NSLocalizedDescriptionKey: description }]];
+                  }
+
+                  return signal;
+              }]
+             switchToLatest]
+            setNameWithFormat:@"+switch: %@ cases: %@ default: %@", signal, cases, defaultSignal];
+}
+```
+
+实现中有3个断言，全部都是针对入参的要求。入参signal信号和cases字典都不能是nil。其次，cases字典里面所有key对应的value必须是RACSignal类型的。注意，defaultSignal是可以为nil的。
+
+接下来的实现比较简单，对入参传进来的signal信号进行map变换，这里的变换是升阶的变换。
+
+signal每次发送出来的一个值，就把这个值当做key值去cases字典里面去查找对应的value。当然value对应的是一个信号。如果value对应的信号不为空，就把signal发送出来的这个值map成字典里面对应的信号。如果value对应为空，那么就把原signal发出来的值map成defaultSignal信号。
+
+如果经过转换之后，得到的信号为nil，就会返回一个error信号。如果得到的信号不为nil，那么原信号完全转换完成就会变成一个高阶信号，这个高阶信号里面装的都是信号。最后再对这个高阶信号执行switchToLatest转换。
+
+### 7. if: then: else:
+
+if: then: else:源码实现如下:
+
+```
++ (RACSignal *)if:(RACSignal *)boolSignal then:(RACSignal *)trueSignal else:(RACSignal *)falseSignal {
+    NSCParameterAssert(boolSignal != nil);
+    NSCParameterAssert(trueSignal != nil);
+    NSCParameterAssert(falseSignal != nil);
+
+    return [[[boolSignal
+              map:^(NSNumber *value) {
+                  NSCAssert([value isKindOfClass:NSNumber.class], @"Expected %@ to send BOOLs, not %@", boolSignal, value);
+
+                  return (value.boolValue ? trueSignal : falseSignal);
+              }]
+             switchToLatest]
+            setNameWithFormat:@"+if: %@ then: %@ else: %@", boolSignal, trueSignal, falseSignal];
+}
+```
+
+入参boolSignal，trueSignal，falseSignal三个信号都不能为nil。
+
+boolSignal里面都必须装的是NSNumber类型的值。
+
+针对boolSignal进行map升阶操作，boolSignal信号里面的值如果是YES，那么就转换成trueSignal信号，如果为NO，就转换成falseSignal。升阶转换完成之后，boolSignal就是一个高阶信号，然后再进行switchToLatest操作。
+
+### 8. catch:
+
+catch:的实现如下:
+
+```
+- (RACSignal *)catch:(RACSignal * (^)(NSError *error))catchBlock {
+    NSCParameterAssert(catchBlock != NULL);
+
+    return [[RACSignal createSignal:^(id subscriber) {
+        RACSerialDisposable *catchDisposable = [[RACSerialDisposable alloc] init];
+
+        RACDisposable *subscriptionDisposable = [self subscribeNext:^(id x) {
+            [subscriber sendNext:x];
+        } error:^(NSError *error) {
+            RACSignal *signal = catchBlock(error);
+            NSCAssert(signal != nil, @"Expected non-nil signal from catch block on %@", self);
+            catchDisposable.disposable = [signal subscribe:subscriber];
+        } completed:^{
+            [subscriber sendCompleted];
+        }];
+
+        return [RACDisposable disposableWithBlock:^{
+            [catchDisposable dispose];
+            [subscriptionDisposable dispose];
+        }];
+    }] setNameWithFormat:@"[%@] -catch:", self.name];
+}
+```
+
+当对原信号进行订阅的时候，如果出现了错误，会去执行catchBlock( )闭包，入参为刚刚产生的error。catchBlock( )闭包产生的是一个新的RACSignal，并再次用订阅者订阅该信号。
+
+这里之所以说是高阶操作，是因为这里原信号发生错误之后，错误会升阶成一个信号。
+
+### 9. catchTo:
+
+catchTo:的实现如下：
+
+```
+- (RACSignal *)catchTo:(RACSignal *)signal {
+    return [[self catch:^(NSError *error) {
+        return signal;
+    }] setNameWithFormat:@"[%@] -catchTo: %@", self.name, signal];
+}
+```
+
+catchTo:的实现就是调用catch:方法，只不过原来catch:方法里面的catchBlock( )闭包，永远都只返回catchTo:的入参，signal信号。
+
+### 10. try:
+
+```
+- (RACSignal *)try:(BOOL (^)(id value, NSError **errorPtr))tryBlock {
+    NSCParameterAssert(tryBlock != NULL);
+
+    return [[self flattenMap:^(id value) {
+        NSError *error = nil;
+        BOOL passed = tryBlock(value, &error);
+        return (passed ? [RACSignal return:value] : [RACSignal error:error]);
+    }] setNameWithFormat:@"[%@] -try:", self.name];
+}
+```
+
+try:也是一个高阶操作。对原信号进行flattenMap变换，对信号发出来的每个值都调用一遍tryBlock( )闭包，如果这个闭包的返回值是YES，那么就返回[RACSignal return:value]，如果闭包的返回值是NO，那么就返回error。原信号中如果都是值，那么经过try:操作之后，每个值都会变成RACSignal，于是原信号也就变成了高阶信号了。
+
+### 11. tryMap:
+
+```
+- (RACSignal *)tryMap:(id (^)(id value, NSError **errorPtr))mapBlock {
+    NSCParameterAssert(mapBlock != NULL);
+
+    return [[self flattenMap:^(id value) {
+        NSError *error = nil;
+        id mappedValue = mapBlock(value, &error);
+        return (mappedValue == nil ? [RACSignal error:error] : [RACSignal return:mappedValue]);
+    }] setNameWithFormat:@"[%@] -tryMap:", self.name];
+}
+```
+
+tryMap:的实现和try:的实现基本一致，唯一不同的就是入参闭包的返回值不同。在tryMap:中调用mapBlock( )闭包，返回是一个对象，如果这个对象不为nil，就返回[RACSignal return:mappedValue]。如果返回的对象是nil，那么就变换成error信号。
+
+### 12. timeout: onScheduler:
+
+```
+- (RACSignal *)timeout:(NSTimeInterval)interval onScheduler:(RACScheduler *)scheduler {
+    NSCParameterAssert(scheduler != nil);
+    NSCParameterAssert(scheduler != RACScheduler.immediateScheduler);
+
+    return [[RACSignal createSignal:^(id subscriber) {
+        RACCompoundDisposable *disposable = [RACCompoundDisposable compoundDisposable];
+
+        RACDisposable *timeoutDisposable = [scheduler afterDelay:interval schedule:^{
+            [disposable dispose];
+            [subscriber sendError:[NSError errorWithDomain:RACSignalErrorDomain code:RACSignalErrorTimedOut userInfo:nil]];
+        }];
+
+        [disposable addDisposable:timeoutDisposable];
+
+        RACDisposable *subscriptionDisposable = [self subscribeNext:^(id x) {
+            [subscriber sendNext:x];
+        } error:^(NSError *error) {
+            [disposable dispose];
+            [subscriber sendError:error];
+        } completed:^{
+            [disposable dispose];
+            [subscriber sendCompleted];
+        }];
+
+        [disposable addDisposable:subscriptionDisposable];
+        return disposable;
+    }] setNameWithFormat:@"[%@] -timeout: %f onScheduler: %@", self.name, (double)interval, scheduler];
+}
+```
+
+timeout: onScheduler:的实现很简单，它比正常的信号订阅多了一个timeoutDisposable操作。它在信号订阅的内部开启了一个scheduler，经过interval的时间之后，就会停止订阅原信号，并对订阅者sendError。
+
+这个操作的表意和方法名完全一致，经过interval的时间之后，就算timeout，那么就停止订阅原信号，并sendError。
+
+> 总结一下ReactiveCocoa v2.5中高阶信号的升阶 / 降阶操作：
+> 
+> > 升阶操作：
+> > 
+> > > 1. map( 把值map成一个信号)
+> > 
+> > > 2. [RACSignal return:signal]
+>  
+> > 降阶操作：
+> > 
+> > > 1. flatten(等效于flatten:0，+merge:)
+> > 
+> > > 2. concat(等效于flatten:1)
+> > 
+> > > 3. flatten:1
+> > 
+> > > 4. switchToLatest
+> > 
+> > > 5. flattenMap:
+>
+> 这5种操作能将高阶信号变为低阶信号，但是最终降阶之后的效果就只有3种：switchToLatest，flatten，concat。具体的图示见上面的分析。
+
 ## 同步操作
 
 ## 副作用操作
