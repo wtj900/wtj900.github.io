@@ -2618,6 +2618,531 @@ groupBy:操作就是groupBy:transform:的缩减版，transform传入的为nil。
 
 ## 组合操作
 
+### 1. startWith:
+
+```
+- (instancetype)startWith:(id)value {
+ 
+    return [[[self.class return:value]
+             concat:self]
+            setNameWithFormat:@"[%@] -startWith: %@", self.name, [value rac_description]];
+}
+```
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-startWith.png)
+
+startWith:的实现很简单，就是先构造一个只发送一个value的信号，然后这个信号发送完毕之后接上原信号。得到的新的信号就是在原信号前面新加了一个值。
+
+### 2. concat:(对象方法)
+
+这里说的concat:是在父类RACStream中定义的。
+
+```
+- (instancetype)concat:(RACStream *)stream {
+    return nil;
+}
+```
+
+父类中定义的这个方法就返回一个nil，具体的实现还要子类去重写。
+
+### 3. concat:(类方法)
+
+```
++ (instancetype)concat:(id)streams {
+    RACStream *result = self.empty;
+    for (RACStream *stream in streams) {
+        result = [result concat:stream];
+    }
+ 
+    return [result setNameWithFormat:@"+concat: %@", streams];
+}
+```
+
+这个concat:后面跟着一个数组，数组里面包含这很多信号，concat:依次把这些信号concat:连接串起来。
+
+### 4. merge:(多个信号)
+
+```
++ (RACSignal *)merge:(id)signals {
+    NSMutableArray *copiedSignals = [[NSMutableArray alloc] init];
+    for (RACSignal *signal in signals) {
+        [copiedSignals addObject:signal];
+    }
+
+    return [[[RACSignal
+              createSignal:^ RACDisposable * (id subscriber) {
+                  for (RACSignal *signal in copiedSignals) {
+                      [subscriber sendNext:signal];
+                  }
+
+                  [subscriber sendCompleted];
+                  return nil;
+              }]
+             flatten]
+            setNameWithFormat:@"+merge: %@", copiedSignals];
+}
+```
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-merge_mul.png)
+
+merge:后面跟一个数组。先会新建一个数组copiedSignals，把传入的信号都装到数组里。然后依次发送数组里面的信号。由于新信号也是一个高阶信号，因为sendNext会把各个信号都依次发送出去，所以需要flatten操作把这个信号转换成值发送出去。
+
+从上图上看，上下两个信号就像被拍扁了一样，就成了新信号的发送顺序。
+
+### 5. merge:(单个信号)
+
+```
+- (RACSignal *)merge:(RACSignal *)signal {
+    return [[RACSignal
+             merge:@[ self, signal ]]
+            setNameWithFormat:@"[%@] -merge: %@", self.name, signal];
+}
+```
+
+merge:后面参数也可以跟一个信号，那么merge:就是合并这两个信号。具体实现和merge:多个信号是一样的原理。
+
+### 6. zip:
+
+```
++ (instancetype)zip:(id)streams {
+    return [[self join:streams block:^(RACStream *left, RACStream *right) {
+        return [left zipWith:right];
+    }] setNameWithFormat:@"+zip: %@", streams];
+}
+```
+
+zip:后面可以跟一个数组，数组里面装的是各种信号流。
+
+它的实现是调用了join: block: 实现的。
+
+```
++ (instancetype)join:(id)streams block:(RACStream * (^)(id, id))block {
+    RACStream *current = nil;
+    // 第一步
+    for (RACStream *stream in streams) {
+
+        if (current == nil) {
+            current = [stream map:^(id x) {
+                return RACTuplePack(x);
+            }];
+
+            continue;
+        }
+
+        current = block(current, stream);
+    }
+    // 第二步
+    if (current == nil) return [self empty];
+
+    return [current map:^(RACTuple *xs) {
+
+        NSMutableArray *values = [[NSMutableArray alloc] init];
+        // 第三步
+        while (xs != nil) {
+            [values insertObject:xs.last ?: RACTupleNil.tupleNil atIndex:0];
+            xs = (xs.count > 1 ? xs.first : nil);
+        }
+        // 第四步
+        return [RACTuple tupleWithObjectsFromArray:values];
+    }];
+}
+```
+
+join: block: 的实现可以分为4步：
+
+1. 依次打包各个信号流，把每个信号流都打包成元组RACTuple。首先第一个信号流打包成一个元组，这个元组里面就一个信号。接着把第一个元组和第二个信号执行block( )闭包里面的操作。传入的block( )闭包执行的是zipWith:的操作。这个操作是把两个信号“压”在一起。得到第二个元组，里面装着是第一个元组和第二个信号。之后每次循环都执行类似的操作，再把第二个元组和第三个信号进行zipWith:操作，以此类推下去，直到所有的信号流都循环一遍。
+2. 经过第一步的循环操作之后，还是nil，那么肯定就是空信号了，就返回empty信号。
+3. 这一步是把之前第一步打包出来的结果，还原回原信号的过程。经过第一步的循环之后，current会是类似这个样子，(((1), 2), 3)，第三步就是为了把这种多重元组解出来，每个信号流都依次按照顺序放在数组里。注意观察current的特点，最外层的元组，是一个值和一个元组，所以从最外层的元组开始，一层一层往里“剥”。while循环每次都取最外层元组的last，即那个单独的值，插入到数组的第0号位置，然后取出first即是里面一层的元组。然后依次循环。由于每次都插入到数组0号的位置，类似于链表的头插法，最终数组里面的顺序肯定也保证是原信号的顺序。
+4. 第四步就是把还原成原信号的顺序的数组包装成元组，返回给map操作的闭包。
+
+```
++ (instancetype)tupleWithObjectsFromArray:(NSArray *)array {
+    return [self tupleWithObjectsFromArray:array convertNullsToNils:NO];
+}
+
++ (instancetype)tupleWithObjectsFromArray:(NSArray *)array convertNullsToNils:(BOOL)convert {
+    RACTuple *tuple = [[self alloc] init];
+
+    if (convert) {
+        NSMutableArray *newArray = [NSMutableArray arrayWithCapacity:array.count];
+        for (id object in array) {
+            [newArray addObject:(object == NSNull.null ? RACTupleNil.tupleNil : object)];
+        }
+        tuple.backingArray = newArray;
+    } else {
+        tuple.backingArray = [array copy];
+    }
+
+    return tuple;
+}
+```
+
+在转换过程中，入参convertNullsToNils的含义是，是否把数组里面的NSNull转换成RACTupleNil。
+
+这里转换传入的是NO，所以就是把数组原封不动的copy一份。
+
+测试代码:
+
+```
+    RACSignal *signalD = [RACSignal interval:3 onScheduler:[RACScheduler mainThreadScheduler] withLeeway:0];
+    RACSignal *signalO = [RACSignal interval:1 onScheduler:[RACScheduler mainThreadScheduler] withLeeway:0];
+    RACSignal *signalE = [RACSignal interval:4 onScheduler:[RACScheduler mainThreadScheduler] withLeeway:0];
+    RACSignal *signalB = [RACStream zip:@[signalD,signalO,signalE]];
+
+    [signalB subscribeNext:^(id x) {
+        NSLog(@"最后接收到的值 = %@",x);
+    }];
+```
+
+打印输出：
+
+```
+2016-11-29 13:07:57.349 最后接收到的值 =  (
+    "2016-11-29 05:07:56 +0000",
+    "2016-11-29 05:07:54 +0000",
+    "2016-11-29 05:07:57 +0000"
+)
+ 
+2016-11-29 13:08:01.350 最后接收到的值 =  (
+    "2016-11-29 05:07:59 +0000",
+    "2016-11-29 05:07:55 +0000",
+    "2016-11-29 05:08:01 +0000"
+)
+ 
+2016-11-29 13:08:05.352 最后接收到的值 =  (
+    "2016-11-29 05:08:02 +0000",
+    "2016-11-29 05:07:56 +0000",
+    "2016-11-29 05:08:05 +0000"
+)
+```
+
+最后输出的信号以时间最长的为主，最后接到的信号是一个元组，里面依次包含zip:数组里每个信号在一次“压”缩周期里面的值。
+
+### 7. zip: reduce:
+
+```
++ (instancetype)zip:(id)streams reduce:(id (^)())reduceBlock {
+    NSCParameterAssert(reduceBlock != nil);
+    RACStream *result = [self zip:streams];
+    if (reduceBlock != nil) result = [result reduceEach:reduceBlock];
+    return [result setNameWithFormat:@"+zip: %@ reduce:", streams];
+}
+```
+
+zip: reduce:是一个组合的方法。具体实现可以拆分成两部分，第一部分是先执行zip:，把数组里面的信号流依次都进行组合。这一过程的实现在上一个变换实现中分析过了。zip:完成之后，紧接着进行reduceEach:操作。
+
+这里有一个判断reduceBlock是否为nil的判断，这个判断是针对老版本的“历史遗留问题”。在ReactiveCocoa 2.5之前的版本，是允许reduceBlock传入nil，这里为了防止崩溃，所以加上了这个reduceBlock是否为nil的判断。
+
+```
+- (instancetype)reduceEach:(id (^)())reduceBlock {
+    NSCParameterAssert(reduceBlock != nil);
+
+    __weak RACStream *stream __attribute__((unused)) = self;
+    return [[self map:^(RACTuple *t) {
+        NSCAssert([t isKindOfClass:RACTuple.class], @"Value from stream %@ is not a tuple: %@", stream, t);
+        return [RACBlockTrampoline invokeBlock:reduceBlock withArguments:t];
+    }] setNameWithFormat:@"[%@] -reduceEach:", self.name];
+}
+```
+
+`reduceEach:`它会动态的构造闭包，对原信号每个元组，执行reduceBlock( )闭包里面的方法。一般用法如下：
+
+```
+   [RACStream zip:@[ stringSignal, intSignal ] reduce:^(NSString *string, NSNumber *number) {
+       return [NSString stringWithFormat:@"%@: %@", string, number];
+   }];
+```
+
+### 8. combineLatestWith:
+
+```
+- (RACSignal *)combineLatestWith:(RACSignal *)signal {
+    NSCParameterAssert(signal != nil);
+
+    return [[RACSignal createSignal:^(id subscriber) {
+        RACCompoundDisposable *disposable = [RACCompoundDisposable compoundDisposable];
+
+        // 初始化第一个信号的一些标志变量
+        __block id lastSelfValue = nil;
+        __block BOOL selfCompleted = NO;
+
+        // 初始化第二个信号的一些标志变量
+        __block id lastOtherValue = nil;
+        __block BOOL otherCompleted = NO;
+
+        // 这里是一个判断是否sendNext的闭包
+        void (^sendNext)(void) = ^{ };
+
+        // 订阅第一个信号
+        RACDisposable *selfDisposable = [self subscribeNext:^(id x) { }];
+        [disposable addDisposable:selfDisposable];
+
+        // 订阅第二个信号
+        RACDisposable *otherDisposable = [signal subscribeNext:^(id x) { }];
+        [disposable addDisposable:otherDisposable];
+
+        return disposable;
+    }] setNameWithFormat:@"[%@] -combineLatestWith: %@", self.name, signal];
+}
+```
+
+大体实现思路比较简单，在新信号里面分别订阅原信号和入参signal信号。
+
+```
+RACDisposable *selfDisposable = [self subscribeNext:^(id x) {
+    @synchronized (disposable) {
+        lastSelfValue = x ?: RACTupleNil.tupleNil;
+        sendNext();
+    }
+} error:^(NSError *error) {
+    [subscriber sendError:error];
+} completed:^{
+    @synchronized (disposable) {
+        selfCompleted = YES;
+        if (otherCompleted) [subscriber sendCompleted];
+    }
+}];
+```
+
+先来看看原信号订阅的具体实现：
+
+在subscribeNext闭包中，记录下原信号最新发送的x值，并保存到lastSelfValue中。从此lastSelfValue变量每次都保存原信号发送过来的最新的值。然后再调用sendNext( )闭包。
+
+在completed闭包中，selfCompleted中记录下原信号发送完成。这是还要判断otherCompleted是否完成，即入参信号signal是否发送完成，只有两者都发送完成了，组合的新信号才能算全部发送完成。
+
+```
+RACDisposable *otherDisposable = [signal subscribeNext:^(id x) {
+    @synchronized (disposable) {
+        lastOtherValue = x ?: RACTupleNil.tupleNil;
+        sendNext();
+    }
+} error:^(NSError *error) {
+    [subscriber sendError:error];
+} completed:^{
+    @synchronized (disposable) {
+        otherCompleted = YES;
+        if (selfCompleted) [subscriber sendCompleted];
+    }
+}];
+```
+
+这是对入参信号signal的处理实现。和原信号的处理方式完全一致。现在重点就要看看sendNext( )闭包中都做了些什么。
+
+```
+void (^sendNext)(void) = ^{
+    @synchronized (disposable) {
+        if (lastSelfValue == nil || lastOtherValue == nil) return;
+        [subscriber sendNext:RACTuplePack(lastSelfValue, lastOtherValue)];
+    }
+};
+```
+
+在sendNext( )闭包中，如果lastSelfValue 或者 lastOtherValue 其中之一有一个为nil，就return，因为这个时候无法结合在一起。当两个信号都有值，那么就把这两个信号的最新的值打包成元组发送出来。
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-combineLatestWith.png)
+
+可以看到，每个信号每发送出来一个新的值，都会去找另外一个信号上一个最新的值进行结合。
+
+这里可以对比一下类似的zip:操作
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-zip.png)
+
+zip:操作是会把新来的信号的值存起来，放在数组里，然后另外一个信号发送一个值过来就和数组第0位的值相互结合成新的元组信号发送出去，并分别移除数组里面第0位的两个值。zip:能保证每次结合的值都是唯一的，不会一个原信号的值被多次结合到新的元组信号中。但是combineLatestWith:是不能保证这一点的，在原信号或者另外一个信号新信号发送前，每次发送信号都会结合当前最新的信号，这里就会有反复结合的情况。
+
+### 9. combineLatest:
+
+```
++ (RACSignal *)combineLatest:(id)signals {
+    return [[self join:signals block:^(RACSignal *left, RACSignal *right) {
+        return [left combineLatestWith:right];
+    }] setNameWithFormat:@"+combineLatest: %@", signals];
+}
+```
+
+combineLatest:的实现就是把入参数组里面的每个信号都调用一次join: block:方法。传入的闭包是把两个信号combineLatestWith:一下。combineLatest:的实现就是2个操作的组合。具体实现上面也都分析过，这里不再赘述。
+
+### 10. combineLatest: reduce:
+
+```
++ (RACSignal *)combineLatest:(id)signals reduce:(id (^)())reduceBlock {
+    NSCParameterAssert(reduceBlock != nil);
+    RACSignal *result = [self combineLatest:signals];
+    if (reduceBlock != nil) result = [result reduceEach:reduceBlock]; 
+    return [result setNameWithFormat:@"+combineLatest: %@ reduce:", signals];
+}
+```
+
+combineLatest: reduce: 的实现可以类比zip: reduce:的实现。
+
+具体实现可以拆分成两部分，第一部分是先执行combineLatest:，把数组里面的信号流依次都进行组合。这一过程的实现在上一个变换实现中分析过了。combineLatest:完成之后，紧接着进行reduceEach:操作。
+
+这里有一个判断reduceBlock是否为nil的判断，这个判断是针对老版本的“历史遗留问题”。在ReactiveCocoa 2.5之前的版本，是允许reduceBlock传入nil，这里为了防止崩溃，所以加上了这个reduceBlock是否为nil的判断。
+
+### 11. combinePreviousWithStart: reduce:
+
+这个方法的实现也是多个变换操作组合在一起的。
+
+```
+- (instancetype)combinePreviousWithStart:(id)start reduce:(id (^)(id previous, id next))reduceBlock {
+    NSCParameterAssert(reduceBlock != NULL);
+    return [[[self
+              scanWithStart:RACTuplePack(start)
+              reduce:^(RACTuple *previousTuple, id next) {
+                  id value = reduceBlock(previousTuple[0], next);
+                  return RACTuplePack(next, value);
+              }]
+             map:^(RACTuple *tuple) {
+                 return tuple[1];
+             }]
+            setNameWithFormat:@"[%@] -combinePreviousWithStart: %@ reduce:", self.name, [start rac_description]];
+}
+```
+
+combinePreviousWithStart: reduce:的实现完全可以类比scanWithStart:reduce:的实现。举个例子来说明他们俩的不同。
+
+```
+      RACSequence *numbers = @[ @1, @2, @3, @4 ].rac_sequence;
+
+      RACSignal *signalA = [numbers combinePreviousWithStart:@0 reduce:^(NSNumber *previous, NSNumber *next) {
+          return @(previous.integerValue + next.integerValue);
+      }].signal;
+
+    RACSignal *signalB = [numbers scanWithStart:@0 reduce:^(NSNumber *previous, NSNumber *next) {
+        return @(previous.integerValue + next.integerValue);
+    }].signal;
+```
+
+signalA输出如下：
+
+```
+1
+3
+5
+7
+```
+
+signalB输出如下：
+
+```
+1
+3
+6
+10
+```
+
+现在应该不同点应该很明显了。combinePreviousWithStart: reduce:实现的是两两之前的加和，而scanWithStart:reduce:实现的累加。
+
+为什么会这样呢，具体看看combinePreviousWithStart: reduce:的实现。
+
+虽然combinePreviousWithStart: reduce:也是调用了scanWithStart:reduce:，但是初始值是RACTuplePack(start)元组，聚合reduce的过程也有所不同：
+
+```
+id value = reduceBlock(previousTuple[0], next); 
+return RACTuplePack(next, value);
+```
+
+依次调用reduceBlock( )闭包，传入previousTuple[0], next，这里reduceBlock( )闭包是进行累加的操作，所以就是把前一个元组的第0位加上后面新来的信号的值。得到的值拼成新的元组，新的元组由next和value值构成。
+
+如果打印出上述例子中combinePreviousWithStart: reduce:的加合过程中每个信号的值，如下：
+
+```
+(
+    1,
+    1
+)
+ 
+ (
+    2,
+    3
+)
+ (
+    3,
+    5
+)
+ (
+    4,
+    7
+)
+```
+
+由于这样拆成元组之后，下次再进行操作的时候，还可以拿到前一个信号的值，这样就不会形成累加的效果。
+
+### 12. sample:
+
+```
+- (RACSignal *)sample:(RACSignal *)sampler {
+    NSCParameterAssert(sampler != nil);
+
+    return [[RACSignal createSignal:^(id subscriber) {
+        NSLock *lock = [[NSLock alloc] init];
+        __block id lastValue;
+        __block BOOL hasValue = NO;
+
+        RACSerialDisposable *samplerDisposable = [[RACSerialDisposable alloc] init];
+        RACDisposable *sourceDisposable = [self subscribeNext:^(id x) { // 暂时省略 }];
+
+        samplerDisposable.disposable = [sampler subscribeNext:^(id _) { // 暂时省略 }];
+
+        return [RACDisposable disposableWithBlock:^{
+            [samplerDisposable dispose];
+            [sourceDisposable dispose];
+        }];
+    }] setNameWithFormat:@"[%@] -sample: %@", self.name, sampler];
+}
+```
+
+sample:内部实现也是对原信号和入参信号sampler分别进行订阅。具体实现就是这两个信号订阅内部都干了些什么。
+
+```
+RACSerialDisposable *samplerDisposable = [[RACSerialDisposable alloc] init];
+RACDisposable *sourceDisposable = [self subscribeNext:^(id x) {
+    [lock lock];
+    hasValue = YES;
+    lastValue = x;
+    [lock unlock];
+} error:^(NSError *error) {
+    [samplerDisposable dispose];
+    [subscriber sendError:error];
+} completed:^{
+    [samplerDisposable dispose];
+    [subscriber sendCompleted];
+}];
+```
+
+这是对原信号的操作，原信号的操作在subscribeNext中就记录了两个变量的值，hasValue记录原信号有值，lastValue记录了原信号的最新的值。这里加了一层NSLock锁进行保护。
+
+在发生error的时候，先把sampler信号取消订阅，然后再sendError:。当原信号完成的时候，同样是先把sampler信号取消订阅，然后再sendCompleted。
+
+```
+samplerDisposable.disposable = [sampler subscribeNext:^(id _) {
+    BOOL shouldSend = NO;
+    id value;
+    [lock lock];
+    shouldSend = hasValue;
+    value = lastValue;
+    [lock unlock];
+
+    if (shouldSend) {
+        [subscriber sendNext:value];
+    }
+} error:^(NSError *error) {
+    [sourceDisposable dispose];
+    [subscriber sendError:error];
+} completed:^{
+    [sourceDisposable dispose];
+    [subscriber sendCompleted];
+}];
+```
+
+这是对入参信号sampler的操作。shouldSend默认值是NO，这个变量控制着是否sendNext:值。只有当原信号有值的时候，hasValue = YES，所以shouldSend = YES，这个时候才能发送原信号的值。这里我们并不关心入参信号sampler的值，从subscribeNext:^(id _)这里可以看出， _代表并不需要它的值。
+
+在发生error的时候，先把原信号取消订阅，然后再sendError:。当sampler信号完成的时候，同样是先把原信号取消订阅，然后再sendCompleted。
+
+![](https://wtj900.github.io/img/RAC/RAC-stream-sample.png)
+
+经过sample:变换就会变成这个样子。只是把原信号的值都移动到了sampler信号发送信号的时刻，值还是和原信号的值一样。
+
+
 ## 高阶信号操作
 
 ## 同步操作
