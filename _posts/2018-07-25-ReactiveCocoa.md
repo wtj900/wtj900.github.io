@@ -859,7 +859,7 @@ zipWith里面有两个数组，分别会存储两个信号的值。
 
 ## 变换操作
 
-### 1. Map
+### 1. Map:(简单变换)
 
 在父类RACStream中定义的,map操作一般是用来信号变换的。
 
@@ -979,7 +979,7 @@ block(value)会把原信号发送过来的value传递给flattenMap的入参。fl
 
 在这个闭包中把原信号的value值传进去进行变换，变换结束之后，包装成和原信号相同类型的信号，返回。返回的信号作为bind函数的闭包的返回值。这样订阅新的map之后的信号就会拿到变换之后的值。
 
-### 2. MapReplace
+### 2. MapReplace:(全部替换)
 
 一般用法如下：
 
@@ -999,7 +999,7 @@ block(value)会把原信号发送过来的value传递给flattenMap的入参。fl
 
 看底层源码就知道，它并不去关心原信号发送的是什么值，原信号发送什么值，都返回入参object的值。
 
-### 3. reduceEach
+### 3. reduceEach:(元组变换)
 
 reduce是减少，聚合在一起的意思，reduceEach就是每个信号内部都聚合在一起。
 
@@ -1128,7 +1128,7 @@ argument0和argument1分别对应着隐藏参数self和_cmd，所以对应着的
 
 接下去的操作就完全转换成了map的操作了。上面已经分析过map操作了，这里就不赘述了。
 
-### 4. reduceApply
+### 4. reduceApply(同3，block为元组第一元素)
 
 举个例子：
 
@@ -1189,7 +1189,7 @@ RACSignal *signalA = [RACSignal createSignal:
 
 reduceApply做的事情和reduceEach基本是等效的，只不过变换规则的block闭包一个是外部传进去的，一个是直接打包在每个信号元组RACTuple中第0位中。
 
-### 5. materialize
+### 5. materialize(转化为RACEvent)
 
 这个方法会把信号包装成RACEvent类型。
 
@@ -1211,7 +1211,7 @@ reduceApply做的事情和reduceEach基本是等效的，只不过变换规则�
 
 sendNext会包装成[RACEvent eventWithValue:x]，error会包装成[RACEvent eventWithError:error]，completed会被包装成RACEvent.completedEvent。注意，当原信号error和completed，新信号都会发送sendCompleted。
 
-### 6. dematerialize
+### 6. dematerialize(RACEvent反转)
 
 这个操作是materialize的逆向操作。它会把包装成RACEvent信号重新还原为正常的值信号。
 
@@ -1238,7 +1238,7 @@ sendNext会包装成[RACEvent eventWithValue:x]，error会包装成[RACEvent eve
 
 这里的实现也用到了bind函数，它会把原信号进行一个变换。新的信号会根据event.eventType进行转换。RACEventTypeCompleted被转换成[RACSignal empty]，RACEventTypeError被转换成[RACSignal error:event.error]，RACEventTypeNext被转换成[RACSignal return:event.value]。
 
-### 7. not
+### 7. not(取反)
 
 ```
 - (RACSignal *)not {
@@ -1252,7 +1252,7 @@ sendNext会包装成[RACEvent eventWithValue:x]，error会包装成[RACEvent eve
 
 not操作需要传入的值都是NSNumber类型的。不是NSNumber类型会报错。not操作会把每个NSNumber按照BOOL的规则，取非，当成新信号的值。
 
-### 8. and
+### 8. and(元组与操作)
 
 ```
 - (RACSignal *)and {
@@ -1327,7 +1327,7 @@ number是原信号RACTuple的第一个值。第一次循环reduce( )闭包是拿
 
 每个RACTuple都map成这样的一个BOOL值。接下去信号就map成了一个新的信号。
 
-### 9. or
+### 9. or(元组或操作)
 
 ```
 - (RACSignal *)or {
@@ -1380,7 +1380,7 @@ any会依次判断RACTupleSequence数组里面的值，依次每个进行filter�
 
 只要RACTuple为NO，就一直返回empty信号，直到BOOL值为YES，就返回1。map变换信号后变成成1。找到了YES之后的值就不会再判断了。如果没有找到YES，中间都是NO的话，一直遍历到数组最后一个，信号只能返回0。
 
-### 10. any:
+### 10. any:(查找第一个满足block条件的值)
 
 ```
 - (RACSignal *)any:(BOOL (^)(id object))predicateBlock {
@@ -1408,7 +1408,7 @@ any会依次判断RACTupleSequence数组里面的值，依次每个进行filter�
 
 所以any:操作的目的是找到第一个满足predicateBlock条件的值。找到了就返回YES的RACSignal的信号，如果没有找到，返回NO的RACSignal。
 
-### 11. any
+### 11. any(上的特殊情况，block返回YES)
 
 ```
 - (RACSignal *)any {
@@ -1418,9 +1418,9 @@ any会依次判断RACTupleSequence数组里面的值，依次每个进行filter�
 }
 ```
 
-ny操作是any:操作中的一种情况。即predicateBlock闭包永远都返回YES，所以any操作之后永远都只能得到一个只发送一个YES的新信号。
+any操作是any:操作中的一种情况。即predicateBlock闭包永远都返回YES，所以any操作之后永远都只能得到一个只发送一个YES的新信号。
 
-### 12. all:
+### 12. all:(未出错或不满足条件之前所有数据)
 
 ```
 - (RACSignal *)all:(BOOL (^)(id object))predicateBlock {
@@ -1448,7 +1448,7 @@ all:操作和any:有点类似。原信号会先经过materialize转换包装成R
 
 all:可以用来判断整个原信号发送过程中是否有错误事件RACEventTypeError，或者是否存在predicateBlock为NO的情况。可以把predicateBlock设置成一个正确条件。如果原信号出现错误事件，或者不满足设置的错误条件，都会发送新信号返回NO。如果全过程都没有出错，或者都满足predicateBlock设置的条件，则一直到RACEventTypeCompleted，发送YES的新信号。
 
-### 13. repeat
+### 13. repeat(未error，循环发送)
 
 ```
 - (RACSignal *)repeat {
@@ -1561,7 +1561,7 @@ subscribeForever一进入这个函数就会调用recursiveBlock( )闭包，闭�
 
 如果原信号没有disposed，dispatch_async会继续执行block，在这个block中还会继续原信号的发送。所以原信号只要没有error信号，disposable.disposed就不会返回YES，就会一直调用block。所以在subscribeForever的error和completed的最后都会调用recurse( )闭包。error调用recurse( )闭包是为了结束调用block，结束所有的信号。completed调用recurse( )闭包是为了继续调用block( )闭包，也就是repeat的本质。原信号会继续发送信号，如此无限循环下去。
 
-### 14. retry:
+### 14. retry:(基本同上，error时重复规定次数，其他正常)
 
 ```
 - (RACSignal *)retry:(NSInteger)retryCount {
@@ -1595,7 +1595,7 @@ subscribeForever一进入这个函数就会调用recursiveBlock( )闭包，闭�
 
 如果原信号没有发生错误，那么原信号在发送结束，subscribeForever也就结束了。retry:操作对于没有任何error的信号相当于什么都没有发生。
 
-### 15. retry
+### 15. retry(发生错误无限重复)
 
 ```
 - (RACSignal *)retry {
@@ -1607,7 +1607,7 @@ subscribeForever一进入这个函数就会调用recursiveBlock( )闭包，闭�
 
 同样的，如果对一个没有error的信号调用retry操作，也是不起任何作用的。
 
-### 16. scanWithStart: reduceWithIndex: 
+### 16. scanWithStart: reduceWithIndex: (有index的终值计算过程)
 
 先写出测试代码:
 
@@ -1658,7 +1658,7 @@ RACSignal *signalA = [RACSignal createSignal:^RACDisposable *(id subscriber)
 
 scanWithStart这个变换由初始值，变换函数reduceBlock( )，和index步进的变量组成。原信号的每个信号都会由变换函数reduceBlock( )进行变换。index每次都是自增。变换的初始值是由入参startingValue传入的。
 
-### 17. scanWithStart: reduce:
+### 17. scanWithStart: reduce: (无index的终值计算过程)
 
 ```
 - (instancetype)scanWithStart:(id)startingValue reduce:(id (^)(id running, id next))reduceBlock {
@@ -1675,7 +1675,7 @@ scanWithStart这个变换由初始值，变换函数reduceBlock( )，和index步
 
 scanWithStart: reduce:就是scanWithStart: reduceWithIndex: 的缩略版。变换函数也是外面闭包reduceBlock( )传进来的。只不过变换过程中不会使用index自增的这个变量。
 
-### 18. aggregateWithStart: reduceWithIndex:
+### 18. aggregateWithStart: reduceWithIndex:(有index的终值计算)
 
 ```
 - (RACSignal *)aggregateWithStart:(id)start reduceWithIndex:(id (^)(id, id, NSUInteger))reduceBlock {
@@ -1694,7 +1694,7 @@ aggregateWithStart: reduceWithIndex:操作调用了scanWithStart: reduceWithInde
 
 值得注意的一点是，原信号如果没有发送complete信号，那么该函数就不会输出新的信号值。因为在一直等待结束。
 
-### 19. aggregateWithStart: reduce:
+### 19. aggregateWithStart: reduce:(无index的终值计算)
 
 ```
 - (RACSignal *)aggregateWithStart:(id)start reduce:(id (^)(id running, id next))reduceBlock {
@@ -1711,7 +1711,7 @@ aggregateWithStart: reduceWithIndex:操作调用了scanWithStart: reduceWithInde
 
 aggregateWithStart: reduce:调用aggregateWithStart: reduceWithIndex:函数，只不过没有只用index值。同样，如果原信号没有发送complete信号，也不会输出任何信号。
 
-### 20. aggregateWithStartFactory: reduce:
+### 20. aggregateWithStartFactory: reduce:(无index的终值计算)
 
 ```
 - (RACSignal *)aggregateWithStartFactory:(id (^)(void))startFactory reduce:(id (^)(id running, id next))reduceBlock {
@@ -1726,7 +1726,7 @@ aggregateWithStart: reduce:调用aggregateWithStart: reduceWithIndex:函数，�
 
 aggregateWithStartFactory: reduce:内部实现就是调用aggregateWithStart: reduce:，只不过入参多了一个产生start的startFactory( )闭包罢了。
 
-### 21. collect
+### 21. collect(收集所有值，数组输出)
 
 ```
 - (RACSignal *)collect {
@@ -1745,7 +1745,7 @@ collect函数会调用aggregateWithStartFactory: reduce:方法。把所有原信
 
 ## 时间操作
 
-### 1. throttle:valuesPassingTest:
+### 1. throttle:valuesPassingTest:(节流输出，block为NO，不节流)
 
 > throttle:节流，在确定的时间间隔中,发送一个信号,之后没有信号，时间结束时发出该信号；如果发送了一个新值，则旧值被丢弃，直到时间结束，发送最新的值；但是当闭包predicate不满足时，说明当前信号不屏蔽，直接输出。
 
@@ -1881,7 +1881,7 @@ shouldThrottle是一个阀门，随时控制原信号是否可以被发送。
 
 还有二点需要注意的是，第一点，正好在interval那一时刻，有新信号发送出来，原信号也会被丢弃，即只有在>=interval的时间之内，原信号没有发送新值，原来的这个值才能发送出来。第二点，原信号发送completed时，会立即执行flushNext(YES)，把原信号的最后一个值发送出来。
 
-### 2. throttle:
+### 2. throttle:(节流输出)
 
 ```
 - (RACSignal *)throttle:(NSTimeInterval)interval {
@@ -1893,7 +1893,7 @@ shouldThrottle是一个阀门，随时控制原信号是否可以被发送。
 
 这个操作其实就是调用了throttle:valuesPassingTest:方法，传入时间间隔interval，predicate( )闭包则永远返回YES，原信号的每个信号都执行节流操作。
 
-### 3. bufferWithTime:onScheduler:
+### 3. bufferWithTime:onScheduler:(时间内元组打包发送)
 
 这个操作的实现是类似于throttle:valuesPassingTest:的实现。
 
@@ -1960,7 +1960,7 @@ flushValues( )闭包里面主要是把数组包装成一个元组，并且全部
 
 和throttle:valuesPassingTest:方法一样，在原信号completed的时候，立即执行flushValues( )闭包，把里面存的值都发送出来。
 
-### 4. delay:
+### 4. delay:(延迟发送)
 
 delay:函数的操作和上面几个套路都是一样的，实现方式也都是模板式的，唯一的不同都在subscribeNext中，和一个判断是否发送的闭包中。
 
@@ -2050,7 +2050,7 @@ leeway这个参数是为dispatch source指定一个期望的定时器事件精�
 
 ## 过滤操作
 
-### 1. filter: 
+### 1. filter: (选择符合条件数据)
 
 这个filter:操作在any:的实现中用到过了。
 
@@ -2102,7 +2102,7 @@ filter:中传入一个闭包，是用筛选的条件。如果满足筛选条件�
 
 ignore:的实现还是由filter:实现的。传入的筛选判断条件是一个值，当原信号发送的值中是这个值的时候，就替换成空信号。
 
-### 4. distinctUntilChanged
+### 4. distinctUntilChanged(相邻数据相同则忽略)
 
 ```
 - (instancetype)distinctUntilChanged {
@@ -2223,7 +2223,7 @@ takeLast:的实现也是按照套路来。先创建一个新信号，return的�
 
 当原信号发送completed信号的时候，把数组里面存的值都sendNext出去。这里要注意的也是该变换发送信号的时机。如果原信号一直没有completed，那么takeLast:就一直没法发出任何信号来。
 
-### 7. takeUntilBlock:
+### 7. takeUntilBlock:(block满足条件停止发送)
 
 ```
 - (instancetype)takeUntilBlock:(BOOL (^)(id x))predicate {
@@ -2243,7 +2243,7 @@ takeLast:的实现也是按照套路来。先创建一个新信号，return的�
 
 takeUntilBlock:是根据传入的predicate闭包作为筛选条件的。一旦predicate( )闭包满足条件，那么新信号停止发送新信号，因为它被置为nil了。和函数名的意思是一样的，take原信号的值，Until直到闭包满足条件。
 
-### 8. takeWhileBlock:
+### 8. takeWhileBlock:(满足条件开始发送)
 
 ```
 - (instancetype)takeWhileBlock:(BOOL (^)(id x))predicate {
@@ -2257,7 +2257,7 @@ takeUntilBlock:是根据传入的predicate闭包作为筛选条件的。一旦pr
 
 takeWhileBlock:的信号集是takeUntilBlock:的信号集的补集。全集是原信号。takeWhileBlock:底层还是调用takeUntilBlock:，只不过判断条件的是不满足predicate( )闭包的集合。
 
-### 9. takeUntil:
+### 9. takeUntil:(终止信号发出，停止发送)
 
 ```
 - (RACSignal *)takeUntil:(RACSignal *)signalTrigger {
@@ -2302,7 +2302,7 @@ takeUntil:的实现也是“经典套路”——return一个新信号，在新�
 
 如果入参signalTrigger一直没有sendNext，那么原信号就会一直sendNext:。
 
-### 10. takeUntilReplacement:
+### 10. takeUntilReplacement:(信号发送替换)
 
 ```
 - (RACSignal *)takeUntilReplacement:(RACSignal *)replacement {
@@ -2493,7 +2493,7 @@ skipUntil实现方法也很简单，当入参的signalTrigger开发发送信号�
 
 skipUntilReplacement:就没什么意义了，把原信号经过skipUntilReplacement:变换之后得到的新的信号就是Replacement信号。所以说这个操作也就没意义了。
 
-### 14. groupBy:transform:
+### 14. groupBy:transform:(分组变换)
 
 ```
 - (RACSignal *)groupBy:(id (^)(id object))keyBlock transform:(id (^)(id object))transformBlock {
