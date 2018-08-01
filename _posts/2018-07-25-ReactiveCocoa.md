@@ -221,7 +221,7 @@ RACSignal调用subscribeNext方法，最后return的时候，会调用[self subs
 
 RACDisposable有3个子类，其中一个就是RACCompoundDisposable。
 
-![](https://wtj900.github.io/img/RAC/RAC-disposable-tree.png)
+![](https://wtj900.github.io/img/RAC/RAC-disposable-subTree.png)
 
 ```
 @interface RACCompoundDisposable : RACDisposable
