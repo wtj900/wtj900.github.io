@@ -9,7 +9,6 @@ catalog: true
 tags:
     - iOS
     - RunLoop
-    - Obj-C
 ---
 
 # 深入理解RunLoop

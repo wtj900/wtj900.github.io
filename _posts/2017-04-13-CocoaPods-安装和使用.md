@@ -7,10 +7,7 @@ author:     BY
 header-img: img/post-bg-hacker.jpg
 catalog: true
 tags:
-    - iOS
-    - Xcode
     - Cocopods
-    - ruby
 ---
 
 # 前言
