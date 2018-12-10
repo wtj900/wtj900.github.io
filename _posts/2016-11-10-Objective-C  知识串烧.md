@@ -10,19 +10,37 @@ tags:
     - iOS
 --- 
 
+## 多线程
+
+总览：
+![](https://wtj900.github.io/img/iOS/多线程.jpg)
+
+NSThread：
+![](https://wtj900.github.io/img/iOS/NSThread.jpg)
+
+GCD：
+![](https://wtj900.github.io/img/iOS/GCD.jpg)
+
+NSOperation：
+![](https://wtj900.github.io/img/iOS/NSOperation.jpg)
+
+原始文件：
+
+[Objective-C Runtime](https://wtj900.github.io/file/2016-11-10-Objective-C_多线程.xmind)
+
 ## RunTime
 
 总览：
-![](https://wtj900.github.io/img/runtime/Runtime.jpg)
+![](https://wtj900.github.io/img/iOS/Runtime.jpg)
 
 数据结构：
-![](https://wtj900.github.io/img/runtime/数据结构.jpg)
+![](https://wtj900.github.io/img/iOS/数据结构.jpg)
 
 消息发送及转发机制：
-![](https://wtj900.github.io/img/runtime/消息发送及转发机制.jpg)
+![](https://wtj900.github.io/img/iOS/消息发送及转发机制.jpg)
 
 Method Swizzling：
-![](https://wtj900.github.io/img/runtime/Method_Swizzling.jpg)
+![](https://wtj900.github.io/img/iOS/Method_Swizzling.jpg)
 
 原始文件：
 
@@ -38,7 +56,7 @@ Method Swizzling：
 ## RunLoop
 
 总览：
-![](https://wtj900.github.io/img/runloop/RunLoop.jpg)
+![](https://wtj900.github.io/img/iOS/RunLoop.jpg)
 
 原始文件：
 
