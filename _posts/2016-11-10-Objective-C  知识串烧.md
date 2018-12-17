@@ -26,7 +26,7 @@ NSOperation：
 
 原始文件：
 
-[Objective-C Runtime](https://wtj900.github.io/file/2016-11-10-Objective-C_多线程.xmind)
+[Objective-C 多线程](https://wtj900.github.io/file/2016-11-10-Objective-C_多线程.xmind)
 
 ## RunTime
 
