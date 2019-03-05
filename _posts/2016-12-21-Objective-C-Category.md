@@ -7,9 +7,8 @@ author:     BY
 header-img: img/post-bg-ios9-web.jpg
 catalog: true
 tags:
-    - Category
     - iOS
-    - ObjC
+    - 开发基础
 ---
 
 >本文转载自美图点评技术团队的：[深入理解Objective-C：Category](http://tech.meituan.com/DiveIntoCategory.html)，略有修改。

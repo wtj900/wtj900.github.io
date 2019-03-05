@@ -7,10 +7,7 @@ author:     BY
 header-img: img/post-bg-iWatch.jpg
 catalog: true
 tags:
-    - iOS
-    - Objective-C
     - AsyncDisplayKit
-    - 开源库
 ---
 
 > AsyncDisplayKit 2.0 Tutorial: Getting Started

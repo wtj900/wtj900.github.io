@@ -8,8 +8,7 @@ header-img: img/post-bg-ios9-web.jpg
 catalog: true
 tags:
     - iOS
-    - 开发技巧
-    - Debug
+    - Xcode
 ---
 
 
