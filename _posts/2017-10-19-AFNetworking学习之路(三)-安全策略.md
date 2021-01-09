@@ -14,6 +14,77 @@ tags:
 > 
 > `AFSecurityPolicy` 主要作用就是验证 `HTTPS` 请求的证书是否有效，如果 app 中有一些敏感信息或者涉及交易信息，一定要使用 `HTTPS` 来保证交易或者用户信息的安全。
 
+#### SecCertificateRef
+
+SecCertificateRef 是 Security.frame 框架下一个的证书引用结构体。它内部引用了一个 X.509 的证书。
+
+> X.509 是密码学里公钥证书的格式标准。 X.509证书里含有公钥、身份信息(比如网络主机名，组织的名称或个体名称等)和签名信息（可以是证书签发机构CA的签名，也可以是自签名）。对于一份经由可信的证书签发机构签名或者可以通过其它方式验证的证书，证书的拥有者就可以用证书及相应的私钥来创建安全的通信.
+
+#### SecKeyRef
+
+HTTPS 中的客户端对内容进行加密，很多可逆的加密算法都有秘钥，而 SecKeyRef 就是这些秘钥抽象的结构体引用。
+
+#### SecTrustRef
+
+这是一个需要验证的信任对象,包含待验证的`证书(certificates)`和支持的验证`方法(policy)`等.
+
+#### SecTrustEvaluate
+
+证书校验函数,在函数的内部递归地从叶节点证书到根证书验证。需要验证证书本身的合法性（验证签名完整性，验证证书有效期等);验证证书颁发者的合法性（查找颁发者的证书并检查其合法性，这个过程是递归的).而递归的终止条件是证书验证过程中遇到了锚点证书(锚点证书:嵌入到操作系统中的根证书,这个根证书是权威证书颁发机构颁发的自签名证书).
+
+上面所说的只是一般的校验方法,那么在有的客户端中,为了确定服务端返回的证书是否是自己所需要的证书,这时我们需要在客户端中导入本地证书.整个过程代码如下:
+
+```
+    //本地导入证书
+    NSString *path = @"证书路径";
+    NSData *certificateData = [NSData dataWithContentsOfFile:path];
+    SecCertificateRef certificate = SecCertificateCreateWithData(NULL, (__bridge CFDataRef)certificateData);
+    NSArray *certificateArray = @[CFBridgingRelease(certificate)];
+    
+    SecTrustRef trust = challenge.protectionSpace.serverTrust;
+    SecTrustResultType result;
+    NSURLCredential *credential = nil;
+    NSURLSessionAuthChallengeDisposition disposition = NSURLSessionAuthChallengePerformDefaultHandling;
+    
+    SecTrustSetAnchorCertificates(trust, (__bridge CFArrayRef)certificateArray);
+    
+    OSStatus status = SecTrustEvaluate(trust, &result);
+    if (status == errSecSuccess &&
+        (result == kSecTrustResultProceed ||
+         result == kSecTrustResultUnspecified))
+    {
+        credential = [NSURLCredential credentialForTrust:trust];
+        if (credential)
+        {
+            disposition = NSURLSessionAuthChallengeUseCredential;
+        }
+        else
+        {
+            disposition = NSURLSessionAuthChallengePerformDefaultHandling;
+        }
+    }
+    else
+    {
+        disposition = NSURLSessionAuthChallengeCancelAuthenticationChallenge;
+    }
+    
+    if (completionHandler) {
+        completionHandler(disposition, credential);
+    }
+```
+
+相较于一般情况处理而言,这里多了一个证书导入,还有一个`SecTrustSetAnchorCertificates(serverTrust对象, 本地证书数组)`将本地证书数组设置成需要参与验证的锚点证书.最后还是通过`SecTrustEvaluate()`方法进行校验,假如验证的数字证书是这个锚点证书的子节点，即验证的数字证书是由锚点证书对应CA或子CA签发的，或是该证书本身，则信任该证书.
+
+#### SecTrustResultType
+
+表示验证结果。其中 kSecTrustResultProceed表示serverTrust验证成功，且该验证得到了用户认可(例如在弹出的是否信任的alert框中选择always trust)。 kSecTrustResultUnspecified表示 serverTrust验证成功，此证书也被暗中信任了，但是用户并没有显示地决定信任该证书。 两者取其一就可以认为对serverTrust验证成功。
+
+
+
+
+
+
+
 
 # AFSSLPinningMode
 
@@ -24,9 +95,9 @@ typedef NS_ENUM(NSUInteger, AFSSLPinningMode) {
     AFSSLPinningModeCertificate,
 };
 ```
-* `AFSSLPinningModeNone`代表客户端无条件地信任服务器端返回的证书
-* `AFSSLPinningModePublicKey`代表客户端会将服务器端返回的证书与本地保存的证书中，PublicKey的部分进行校验；如果正确，才继续进行
-* `AFSSLPinningModeCertificate`代表客户端会将服务器端返回的证书和本地保存的证书中的所有内容，包括PublicKey和证书部分，全部进行校验；如果正确，才继续进行
+* `AFSSLPinningModeNone`在系统的信任机构列表里验证服务端返回的证书，若证书是信任机构签发的就会通过，若是自己服务器生成的证书就不会通过。
+* `AFSSLPinningModePublicKey`需要客户端保存有服务端的证书拷贝，只验证证书里的公钥，不验证证书的有效期等信息。 
+* `AFSSLPinningModeCertificate`需要客户端保存有服务端的证书拷贝，这里验证分两步，第一步验证证书的域名有效期等信息，第二步是对比服务端返回的证书跟客户端返回的是否一致。 
 
 ## 初始化以及设置
 
